@@ -1,0 +1,33 @@
+# Single-container deployment (see internal/ideas/core-build.md §Deploy).
+#
+#   docker compose up -d --build
+#
+# Reads the token from ./.env (BOT_TOKEN, BOT_OWNER_ID, ...) and overrides
+# the host-relative paths with container paths: the SQLite DB lives on the
+# ./data volume, translations and the welcome message ship inside the image.
+services:
+  bot:
+    build: .
+    image: yacm:local
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      # Compose `environment:` wins over `env_file:` for duplicated keys.
+      DB_PATH: /data/bot.db
+      I18N_DIR: /app/i18n
+      WELCOME_MESSAGE: /app/resources/welcome-message.md
+      POLL_TIMEOUT: "30"
+      # DEFAULT_LANG / LOG_LEVEL come from ./.env and are fine as-is.
+    volumes:
+      - ./data:/data
+    healthcheck:
+      # Opens the DB (running migrations) and calls getMe against the
+      # Telegram API — same check as ./build/bot --healthcheck.
+      test: ["CMD", "/app/bot", "--healthcheck"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    # Long polling has no in-flight HTTP to drain, but the sender queue
+    # needs a moment to flush before the DB closes.
+    stop_grace_period: 30s
