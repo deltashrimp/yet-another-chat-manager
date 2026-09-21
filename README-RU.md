@@ -1,10 +1,14 @@
 # yet-another-chat-manager
 
 <div align="center">
+    <img alt="YACM logo" src="./resources/images/Banner.png">
+</div>
 
-    [🇷🇺 Русский](./README-RU.md) 
-    [🇬🇧 English](./README.md)
+<br>
 
+<div align="center"> 
+    <a href="./README-RU.md"> <img alt="RUSSIAN" src="./resources/images/buttons/Russian.png" style="width: 130px; height: auto;"> </a>
+    <a href="./README.md"> <img alt="ENGLISH" src="./resources/images/buttons/English.png" style="width: 130px; height: auto;"> </a>
 </div>
 
 ---
@@ -36,14 +40,14 @@ cp .env.example .env
 ### Docker
 
 ```sh
-cp .env.example .env   # fill in BOT_TOKEN
+cp .env.example .env   # вставьте BOT_TOKEN
 ```
 
 ```sh
 docker compose up -d --build
 ```
 
-Логи идут в stdout (`LOG_LEVEL` from `.env`). Никаких логов внутри контейнера.
+Логи идут в stdout (`LOG_LEVEL` настраивается в `.env`). Никаких логов нет внутри контейнера.
 
 ---
 
@@ -57,7 +61,7 @@ src/
   router/    регистрация слеш команд и парсинг
   handlers/  хендлеры команд
   services/  логика модерации (роли, варны)
-  storage/   SQLite + репозитории
+  storage/   SQLite
   i18n/      переводы
   util/      парсеры аргументов и периодов, форматирование
 ```
