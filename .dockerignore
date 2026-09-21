@@ -1,0 +1,38 @@
+# AUTOGEN
+# --- build context hygiene ------------------------------------------------
+.git
+.gitignore
+README.md
+AGENTS.md
+
+# --- local dev / tooling --------------------------------------------------
+internal/
+.repowise/
+.mcp.json
+opencode.jsonc
+
+# --- build output ---------------------------------------------------------
+build/
+build-*/
+cmake-build-*/
+out/
+
+# --- secrets: never bake into the image ----------------------------------
+.env
+.env.local
+.env.*
+!.env.example
+
+# --- runtime data (mounts, never part of the image) -----------------------
+data/
+*.db
+*.db-wal
+*.db-shm
+
+# --- IDE ------------------------------------------------------------------
+.idea/
+.vscode/
+
+# --- tests run on the host; not needed in the image ----------------------
+tests/
+docs/

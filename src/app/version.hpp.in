@@ -1,0 +1,9 @@
+#pragma once
+
+#ifndef YACM_VERSION
+#define YACM_VERSION "@YACM_VERSION@"
+#endif
+
+#ifndef YACM_BUILD_DATE
+#define YACM_BUILD_DATE "@YACM_BUILD_DATE@"
+#endif

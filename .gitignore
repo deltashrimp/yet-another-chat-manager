@@ -1,0 +1,25 @@
+# Internal dev files
+internal/
+
+# Configs and unique files
+resources/welcome-message.md
+
+# Environment and secrets
+.env
+.env.local
+.env.*
+!.env.example
+
+# Builds
+build/
+cmake-build-*/
+out/
+
+# Runtime data
+data/
+*.db
+*.db-wal
+*.db-shm
+
+# Repowise local store
+.repowise/
