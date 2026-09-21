@@ -1,10 +1,14 @@
 # yet-another-chat-manager
 
 <div align="center">
+    <img alt="YACM logo" src="./resources/images/Banner.png">
+</div>
 
-    [🇷🇺 Русский](./README-RU.md) 
-    [🇬🇧 English](./README.md)
+<br>
 
+<div align="center"> 
+    <a href="./README-RU.md"> <img alt="RUSSIAN" src="./resources/images/buttons/Russian.png" style="width: 130px; height: auto;"> </a>
+    <a href="./README.md"> <img alt="ENGLISH" src="./resources/images/buttons/English.png" style="width: 130px; height: auto;"> </a>
 </div>
 
 ---
