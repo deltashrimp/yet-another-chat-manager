@@ -3,6 +3,7 @@
 #include <spdlog/spdlog.h>
 
 #include <algorithm>
+#include <iterator>
 
 namespace yacm::tg {
 
@@ -50,8 +51,10 @@ void Sender::loop() {
             }
         }
 
+        // On shutdown wait_for_slot() stops pacing and the retry sleeps
+        // return at once, so the remaining queue is drained with a single
+        // best-effort attempt per message (as documented in sender.hpp).
         wait_for_slot(message->chat_id);
-        if (stop_) return;
         send_with_retry(*message);
     }
 }
@@ -66,29 +69,30 @@ void prune(std::deque<std::chrono::steady_clock::time_point>& times,
 
 }  // namespace
 
-void Sender::wait_for_slot(int64_t chat_id) {
+bool Sender::wait_for_slot(int64_t chat_id) {
     std::unique_lock<std::mutex> lk(mu_);
     for (;;) {
+        if (stop_) return false;
         const auto now = std::chrono::steady_clock::now();
 
         prune(global_sends_, now, std::chrono::seconds(1));
         if (static_cast<int>(global_sends_.size()) >= global_per_sec_) {
             const auto wait = global_sends_.front() + std::chrono::seconds(1) - now;
             cv_.wait_for(lk, wait, [this] { return stop_; });
-            if (stop_) return;
             continue;
         }
 
-        auto& chat_times = chat_sends_[chat_id];
-        prune(chat_times, now, std::chrono::minutes(1));
-        if (static_cast<int>(chat_times.size()) >= chat_per_min_) {
-            const auto wait = chat_times.front() + std::chrono::minutes(1) - now;
-            cv_.wait_for(lk, wait, [this] { return stop_; });
-            if (stop_) return;
-            continue;
+        auto it = chat_sends_.find(chat_id);
+        if (it != chat_sends_.end()) {
+            prune(it->second, now, std::chrono::minutes(1));
+            if (static_cast<int>(it->second.size()) >= chat_per_min_) {
+                const auto wait = it->second.front() + std::chrono::minutes(1) - now;
+                cv_.wait_for(lk, wait, [this] { return stop_; });
+                continue;
+            }
         }
 
-        return;
+        return true;
     }
 }
 
@@ -101,6 +105,17 @@ void Sender::record_send(int64_t chat_id) {
     auto& chat_times = chat_sends_[chat_id];
     prune(chat_times, now, std::chrono::minutes(1));
     chat_times.push_back(now);
+
+    // Drop idle chats so the map does not grow with every chat ever seen.
+    for (auto it = chat_sends_.begin(); it != chat_sends_.end();) {
+        prune(it->second, now, std::chrono::minutes(1));
+        it = it->second.empty() ? chat_sends_.erase(it) : std::next(it);
+    }
+}
+
+bool Sender::sleep_unless_stopped(std::chrono::steady_clock::duration d) {
+    std::unique_lock<std::mutex> lk(mu_);
+    return !cv_.wait_for(lk, d, [this] { return stop_; });
 }
 
 void Sender::send_with_retry(const Outgoing& message) {
@@ -115,7 +130,7 @@ void Sender::send_with_retry(const Outgoing& message) {
             if (e.is_flood()) {
                 log_->warn("flood wait {}s, retrying message to chat {}", e.retry_after,
                            message.chat_id);
-                std::this_thread::sleep_for(std::chrono::seconds(e.retry_after + 1));
+                if (!sleep_unless_stopped(std::chrono::seconds(e.retry_after + 1))) return;
                 continue;
             }
             // Permanent-ish failures: log and drop so the queue doesn't stall.
@@ -124,7 +139,7 @@ void Sender::send_with_retry(const Outgoing& message) {
             return;
         } catch (const std::exception& e) {
             log_->error("send error for chat {}: {}", message.chat_id, e.what());
-            std::this_thread::sleep_for(std::chrono::milliseconds(500));
+            if (!sleep_unless_stopped(std::chrono::milliseconds(500))) return;
         }
     }
     log_->error("giving up on message to chat {} after {} attempts", message.chat_id,

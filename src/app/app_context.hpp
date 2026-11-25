@@ -68,6 +68,7 @@ public:
 
 private:
     void process_update(const tg::Update& update);
+    void sleep_unless_stopped(long seconds) const;
 
     std::atomic<bool>& stop_flag_;
     bool shutdown_done_ = false;

@@ -1,9 +1,11 @@
 #pragma once
 
+#include <cstdint>
 #include <string>
 
 namespace yacm::tg {
 struct User;
+struct Chat;
 }
 
 namespace yacm::util {
@@ -13,6 +15,11 @@ std::string html_escape(std::string s);
 
 // "@username" or an HTML profile link using the display name.
 std::string user_tag(const tg::User& user);
+
+// HTML display of a chat name: a public https://t.me/<username> link when
+// the chat has a username, otherwise the (escaped) title. An empty title
+// falls back to `fallback_title` (escaped). Always safe for Telegram HTML.
+std::string chat_display(const tg::Chat& chat, const std::string& fallback_title);
 
 // Raw display name: "First Last".
 std::string display_name(const tg::User& user);

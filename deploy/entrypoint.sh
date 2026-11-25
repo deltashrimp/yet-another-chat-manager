@@ -7,6 +7,12 @@
 set -e
 
 mkdir -p /data
-chown yacm:yacm /data
+# Recursive chown: a bind-mounted ./data may already contain DB files
+# created by a host-side run or an earlier container (local default
+# DB_PATH=./data/bot.db). chowning only the directory leaves those files
+# owned by another uid and the unprivileged bot hits SQLITE_READONLY
+# ("attempt to write a readonly database"). The whole tree is owned by
+# yacm so the bot can write the DB and its WAL/SHM sidecars.
+chown -R yacm:yacm /data
 
 exec setpriv --reuid=yacm --regid=yacm --init-groups /app/bot "$@"

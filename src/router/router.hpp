@@ -28,6 +28,10 @@ public:
     void add(const std::string& name, Handler handler,
              services::Role min_role = services::Role::Everyone, bool dm_only = false);
 
+    // Own bot username (without '@'). Once set, "/cmd@OtherBot" commands
+    // addressed to a different bot are ignored. Empty = accept any suffix.
+    void set_bot_username(const std::string& username);
+
     // Returns true when the message contained a registered command.
     bool dispatch(const tg::Message& message) const;
 
@@ -38,6 +42,7 @@ public:
 
 private:
     std::map<std::string, Command> commands_;
+    std::string bot_username_;  // lower-case
 
     static std::optional<std::pair<std::string, std::string>> parse_command(
         const std::string& text);

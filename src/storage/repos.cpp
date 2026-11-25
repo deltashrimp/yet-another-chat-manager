@@ -30,6 +30,19 @@ UserRow row_from_statement(const Statement& st) {
 UserRepo::UserRepo(Database& db) : db_(db) {}
 
 void UserRepo::upsert(const tg::User& user, int64_t now) {
+    // usernames are unique (case-insensitive index). Telegram usernames can
+    // move between accounts, so a stale row still holding this username
+    // must release it first — otherwise the upsert hits the UNIQUE index
+    // and every update from the new owner fails.
+    if (!user.username.empty()) {
+        Statement free_name(db_.raw(),
+                            "UPDATE users SET username = NULL "
+                            "WHERE lower(username) = ?1 AND id != ?2");
+        free_name.bind(1, lower(user.username));
+        free_name.bind(2, user.id);
+        free_name.step();
+    }
+
     Statement st(db_.raw(),
                  "INSERT INTO users (id, username, first_name, last_name, is_bot, "
                  "first_seen_at, updated_at) "
@@ -41,7 +54,13 @@ void UserRepo::upsert(const tg::User& user, int64_t now) {
                  " is_bot = excluded.is_bot,"
                  " updated_at = excluded.updated_at");
     st.bind(1, user.id);
-    st.bind(2, user.username);
+    // No username -> NULL (the unique index skips NULLs; '' would make all
+    // username-less users collide with each other).
+    if (user.username.empty()) {
+        st.bind_null(2);
+    } else {
+        st.bind(2, user.username);
+    }
     st.bind(3, user.first_name);
     st.bind(4, user.last_name);
     st.bind(5, user.is_bot ? 1 : 0);
@@ -50,6 +69,7 @@ void UserRepo::upsert(const tg::User& user, int64_t now) {
 }
 
 std::optional<UserRow> UserRepo::find_by_username(const std::string& username) {
+    if (username.empty()) return std::nullopt;
     Statement st(db_.raw(),
                  "SELECT id, username, first_name, last_name, is_bot, first_seen_at "
                  "FROM users WHERE lower(username) = ?1");
@@ -88,11 +108,30 @@ void UserRepo::upsert_member(int64_t chat_id, int64_t user_id, const std::string
     st.step();
 }
 
-std::optional<std::string> UserRepo::member_status(int64_t chat_id, int64_t user_id) const {
-    Statement st(db_.raw(), "SELECT status FROM members WHERE chat_id = ?1 AND user_id = ?2");
+void UserRepo::mark_member_active(int64_t chat_id, int64_t user_id, int64_t now) {
+    // Only revives rows that say the user is gone; never touches a cached
+    // creator/administrator/restricted status, and never inserts a guessed
+    // status (a missing row makes role checks ask Telegram instead).
+    Statement st(db_.raw(),
+                 "UPDATE members SET status = 'member', updated_at = ?3 "
+                 "WHERE chat_id = ?1 AND user_id = ?2 AND status IN ('left', 'kicked')");
     st.bind(1, chat_id);
     st.bind(2, user_id);
-    if (st.step()) return st.col_str(0);
+    st.bind(3, now);
+    st.step();
+}
+
+std::optional<std::string> UserRepo::member_status(int64_t chat_id, int64_t user_id) const {
+    if (auto entry = member_entry(chat_id, user_id)) return entry->status;
+    return std::nullopt;
+}
+
+std::optional<MemberEntry> UserRepo::member_entry(int64_t chat_id, int64_t user_id) const {
+    Statement st(db_.raw(),
+                 "SELECT status, updated_at FROM members WHERE chat_id = ?1 AND user_id = ?2");
+    st.bind(1, chat_id);
+    st.bind(2, user_id);
+    if (st.step()) return MemberEntry{st.col_str(0), st.col_i64(1)};
     return std::nullopt;
 }
 
@@ -379,7 +418,7 @@ ReportRepo::ReportRepo(Database& db) : db_(db) {}
 
 void ReportRepo::add(int64_t chat_id, int64_t message_id, int64_t reporter_id,
                      int64_t target_id, int64_t created_at) {
-    // INSERT OR IGNORE: the UNIQUE (reporter_id, message_id) constraint
+    // INSERT OR IGNORE: the UNIQUE (chat_id, reporter_id, message_id) constraint
     // silently drops a repeated report (spec §3).
     Statement st(db_.raw(),
                  "INSERT OR IGNORE INTO reports (chat_id, message_id, reporter_id, "
@@ -392,12 +431,26 @@ void ReportRepo::add(int64_t chat_id, int64_t message_id, int64_t reporter_id,
     st.step();
 }
 
-bool ReportRepo::already_reported(int64_t reporter_id, int64_t message_id) const {
+bool ReportRepo::already_reported(int64_t chat_id, int64_t reporter_id,
+                                  int64_t message_id) const {
+    // message_id is only unique within a chat, so the chat is part of the key.
     Statement st(db_.raw(),
-                 "SELECT 1 FROM reports WHERE reporter_id = ?1 AND message_id = ?2 "
-                 "LIMIT 1");
-    st.bind(1, reporter_id);
-    st.bind(2, message_id);
+                 "SELECT 1 FROM reports WHERE chat_id = ?1 AND reporter_id = ?2 "
+                 "AND message_id = ?3 LIMIT 1");
+    st.bind(1, chat_id);
+    st.bind(2, reporter_id);
+    st.bind(3, message_id);
+    return st.step();
+}
+
+bool ReportRepo::already_reported_target(int64_t chat_id, int64_t reporter_id,
+                                         int64_t target_id) const {
+    Statement st(db_.raw(),
+                 "SELECT 1 FROM reports WHERE chat_id = ?1 AND reporter_id = ?2 "
+                 "AND target_id = ?3 LIMIT 1");
+    st.bind(1, chat_id);
+    st.bind(2, reporter_id);
+    st.bind(3, target_id);
     return st.step();
 }
 

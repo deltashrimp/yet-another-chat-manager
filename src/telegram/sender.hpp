@@ -49,7 +49,10 @@ public:
 private:
     void loop();
     void record_send(int64_t chat_id);
-    void wait_for_slot(int64_t chat_id);
+    // Blocks until a send slot is free; false when shutdown interrupted it.
+    bool wait_for_slot(int64_t chat_id);
+    // Sleeps for `d` unless shutdown is requested; false when interrupted.
+    bool sleep_unless_stopped(std::chrono::steady_clock::duration d);
     void send_with_retry(const Outgoing& message);
 
     TelegramClient& client_;

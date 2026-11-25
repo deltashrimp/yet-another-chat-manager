@@ -28,6 +28,9 @@ class Roles {
 public:
     Roles(const config::Config& config, tg::TelegramClient& client, storage::UserRepo& users);
 
+    // Cached member statuses older than this are re-validated live.
+    static constexpr int64_t kCacheTtlSeconds = 10 * 60;
+
     Role resolve(int64_t chat_id, const tg::User& user) const;
 
     // "creator" -> Owner, "administrator" -> Admin, everything else ->

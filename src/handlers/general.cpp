@@ -153,10 +153,12 @@ void on_rules(AppContext& ctx, const tg::Message& m, const std::string& /*args*/
 }
 
 // Spec §4.6: /report (everyone, group) — forwards a complaint about the
-// replied-to message to the chat admins via DM. Spec §3: one report per
-// (reporter, message); repeats are ignored. Delivery failures (an admin
-// never opened a dialog with the bot) are logged by the sender; the loop
-// continues to the remaining admins (spec §4.6 note).
+// replied-to message to the chat admins via DM. Guards: no self-reports
+// (errors.report_self), §2 hierarchy (the bot/owner/admins cannot be
+// reported), spec §3 dedup per (reporter, message) AND per (chat, reporter,
+// target) so the same message/user can't be reported again. Delivery
+// failures (an admin never opened a dialog with the bot) are logged by the
+// sender; the loop continues to the remaining admins (spec §4.6 note).
 void on_report(AppContext& ctx, const tg::Message& m, const std::string& /*args*/) {
     if (!require_group(ctx, m)) return;
     if (!m.from || !m.chat) return;
@@ -179,8 +181,31 @@ void on_report(AppContext& ctx, const tg::Message& m, const std::string& /*args*
         reply_error(ctx, m, "errors.report_self");
         return;
     }
-    if (ctx.reports->already_reported(m.from->id, reported.message_id)) {
-        reply(ctx, m, ctx.i18n.t(lang, "reports.sent"));  // already sent once
+    // Spec §2 hierarchy applies to reports too: the bot itself, the chat
+    // owner and other admins cannot be reported (they get the complaint DMs).
+    if (reported.from->id == ctx.bot_id) {
+        reply_error(ctx, m, "errors.cannot_report_bot");
+        return;
+    }
+    const services::Role target_role = ctx.roles->resolve(m.chat->id, *reported.from);
+    if (target_role == services::Role::Owner) {
+        reply_error(ctx, m, "errors.cannot_report_owner");
+        return;
+    }
+    if (target_role == services::Role::Admin) {
+        reply_error(ctx, m, "errors.cannot_report_admin");
+        return;
+    }
+    // Spec §3 dedup: once per (reporter, message) — a repeat of the same
+    // message is not a new report (the ack says so instead of lying "Sent").
+    if (ctx.reports->already_reported(m.chat->id, m.from->id, reported.message_id)) {
+        reply_error(ctx, m, "errors.report_already");
+        return;
+    }
+    // Same reporter cannot spam reports about the same user in this chat.
+    if (ctx.reports->already_reported_target(m.chat->id, m.from->id,
+                                             reported.from->id)) {
+        reply_error(ctx, m, "errors.report_already_target");
         return;
     }
 
@@ -197,14 +222,15 @@ void on_report(AppContext& ctx, const tg::Message& m, const std::string& /*args*
             ctx.users->upsert_member(m.chat->id, a.user.id, a.status, now, std::nullopt);
             // The bot itself is an admin when it manages the chat, but it
             // cannot DM itself — skip it (spec §2/§9).
-            if (a.user.id != ctx.bot_id) admin_ids.push_back(a.user.id);
+            // Other bots can't receive DMs from bots either.
+            if (a.user.id != ctx.bot_id && !a.user.is_bot) admin_ids.push_back(a.user.id);
         }
     } catch (const std::exception& e) {
         spdlog::warn("getChatAdministrators failed for {}: {}", m.chat->id, e.what());
     }
     if (!live_ok) {
         for (const auto& row : ctx.users->admins(m.chat->id)) {
-            if (row.id != ctx.bot_id) admin_ids.push_back(row.id);
+            if (row.id != ctx.bot_id && !row.is_bot) admin_ids.push_back(row.id);
         }
     }
     if (admin_ids.empty()) {

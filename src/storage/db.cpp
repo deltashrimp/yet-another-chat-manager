@@ -276,6 +276,29 @@ std::vector<std::pair<int, std::string>> Database::migrations() {
                 PRIMARY KEY (chat_id, command)
             );
         )sql"},
+        {3, R"sql(
+            -- Users without a username were stored as '' instead of NULL,
+            -- so the unique username index made them collide.
+            UPDATE users SET username = NULL WHERE username = '';
+
+            -- message_id is only unique per chat: report dedup must include
+            -- chat_id (the old UNIQUE (reporter_id, message_id) silently
+            -- dropped legitimate reports from other chats).
+            CREATE TABLE reports_v3 (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                chat_id     INTEGER NOT NULL,
+                message_id  INTEGER NOT NULL,
+                reporter_id INTEGER NOT NULL,
+                target_id   INTEGER NOT NULL,
+                created_at  INTEGER NOT NULL,
+                UNIQUE (chat_id, reporter_id, message_id)
+            );
+            INSERT INTO reports_v3 (id, chat_id, message_id, reporter_id, target_id, created_at)
+                SELECT id, chat_id, message_id, reporter_id, target_id, created_at FROM reports;
+            DROP TABLE reports;
+            ALTER TABLE reports_v3 RENAME TO reports;
+            CREATE INDEX idx_reports_chat ON reports (chat_id);
+        )sql"},
     };
 }
 

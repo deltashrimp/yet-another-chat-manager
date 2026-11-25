@@ -222,11 +222,9 @@ void on_settings(AppContext& ctx, const tg::Message& m, const std::string& /*arg
         lang, s.rules_html.empty() ? "settings.rules_not_set" : "settings.rules_set");
 
     const std::string title =
-        m.chat->title.empty() ? ctx.i18n.t(lang, "idg.untitled") : m.chat->title;
+        util::chat_display(*m.chat, ctx.i18n.t(lang, "idg.untitled"));
     std::string text =
-        fmt::format(fmt::runtime(ctx.i18n.t(lang, "settings.title")),
-                    util::html_escape(title)) +
-        "\n";
+        fmt::format(fmt::runtime(ctx.i18n.t(lang, "settings.title")), title) + "\n";
     text += fmt::format(fmt::runtime(ctx.i18n.t(lang, "settings.language")), lang_name) + "\n";
     text += fmt::format(fmt::runtime(ctx.i18n.t(lang, "settings.reports")), reports) + "\n";
     text += fmt::format(fmt::runtime(ctx.i18n.t(lang, "settings.warn_limit")), s.warn_limit) +
@@ -248,10 +246,9 @@ void on_answerlist(AppContext& ctx, const tg::Message& m, const std::string& /*a
     const std::string lang = chat_lang(ctx, m);
 
     const std::string title =
-        m.chat->title.empty() ? ctx.i18n.t(lang, "idg.untitled") : m.chat->title;
+        util::chat_display(*m.chat, ctx.i18n.t(lang, "idg.untitled"));
     std::vector<std::string> lines;
-    lines.push_back(fmt::format(fmt::runtime(ctx.i18n.t(lang, "answerlist.title")),
-                                util::html_escape(title)));
+    lines.push_back(fmt::format(fmt::runtime(ctx.i18n.t(lang, "answerlist.title")), title));
     // Enumerate all registered commands (BotOwner outranks everything; the
     // router returns them alphabetically) and drop the non-toggleable ones,
     // so the list stays in sync with registration automatically.

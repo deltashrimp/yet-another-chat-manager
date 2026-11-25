@@ -37,7 +37,10 @@ std::pair<std::string, std::string> split_ref_reason(const std::string& args) {
     if (s.empty()) return {"", ""};
 
     const std::size_t sp = s.find_first_of(" \t");
-    if (sp == std::string::npos) return {s, ""};
+    if (sp == std::string::npos) {
+        if (util::parse_user_ref(s).valid()) return {s, ""};
+        return {"", s};  // reply usage with a one-word reason ("/ban spam")
+    }
 
     const std::string tok = s.substr(0, sp);
     const std::string rest = util::trim(s.substr(sp + 1));

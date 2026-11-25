@@ -60,26 +60,34 @@ nlohmann::json Client::call(const std::string& method, const nlohmann::json& par
                             long timeout_s) {
     auto [status, body] = post(api_url_ + method, params.dump(), timeout_s);
 
-    if (status < 200 || status >= 300) {
-        throw TelegramError(static_cast<int>(status),
-                            "HTTP " + std::to_string(status) + ": " + body);
-    }
-
-    nlohmann::json response;
-    try {
-        response = nlohmann::json::parse(body);
-    } catch (const std::exception&) {
+    // The Bot API reports errors (including 429 flood waits) with a non-2xx
+    // HTTP status AND a JSON body carrying error_code / retry_after, so the
+    // body must be parsed before the status is judged — otherwise flood
+    // waits are never honoured and callers hammer the API.
+    nlohmann::json response = nlohmann::json::parse(body, nullptr, /*allow_exceptions=*/false);
+    if (response.is_discarded() || !response.is_object()) {
+        if (status < 200 || status >= 300) {
+            throw TelegramError(static_cast<int>(status), "HTTP " + std::to_string(status));
+        }
         throw TelegramError("invalid JSON response from Telegram");
     }
 
     if (!response.value("ok", false)) {
-        TelegramError err(response.value("error_code", 0),
-                          response.value("description", std::string("unknown error")));
-        if (response.contains("parameters") && response["parameters"].contains("retry_after")) {
-            err.retry_after = response["parameters"]["retry_after"].get<long>();
+        const int code = response.value("error_code", static_cast<int>(status));
+        std::string description = "unknown error";
+        if (response.contains("description") && response["description"].is_string()) {
+            description = response["description"].get<std::string>();
+        }
+        TelegramError err(code, std::move(description));
+        if (response.contains("parameters") && response["parameters"].is_object()) {
+            const auto& p = response["parameters"];
+            if (p.contains("retry_after") && p["retry_after"].is_number_integer()) {
+                err.retry_after = p["retry_after"].get<long>();
+            }
         }
         throw err;
     }
+    if (!response.contains("result")) throw TelegramError("Telegram response has no result");
     return response.at("result");
 }
 

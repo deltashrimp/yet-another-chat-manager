@@ -22,8 +22,11 @@ services:
       - ./data:/data
     healthcheck:
       # Opens the DB (running migrations) and calls getMe against the
-      # Telegram API — same check as ./build/bot --healthcheck.
-      test: ["CMD", "/app/bot", "--healthcheck"]
+      # Telegram API — same check as ./build/bot --healthcheck. Runs with
+      # the same unprivileged user as the bot, so any WAL/SHM file the
+      # check (re)creates is owned by yacm, never by root — a root-owned
+      # -wal/-shm would make the bot's writes fail with SQLITE_READONLY.
+      test: ["CMD", "setpriv", "--reuid=yacm", "--regid=yacm", "--init-groups", "/app/bot", "--healthcheck"]
       interval: 30s
       timeout: 5s
       retries: 3

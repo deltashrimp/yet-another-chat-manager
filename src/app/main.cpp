@@ -61,11 +61,19 @@ int main(int argc, char** argv) {
         cfg = yacm::config::from_env();
     } catch (const yacm::config::ConfigError& e) {
         std::fprintf(stderr, "config error: %s\n", e.what());
+        curl_global_cleanup();
         return 2;
     }
 
     auto log = spdlog::stdout_color_mt("yacm");
-    log->set_level(spdlog::level::from_str(cfg.log_level));
+    // spdlog maps unknown names to "off", which would silently disable all
+    // logging on a typo (e.g. LOG_LEVEL=information).
+    auto level = spdlog::level::from_str(cfg.log_level);
+    if (level == spdlog::level::off && cfg.log_level != "off") {
+        std::fprintf(stderr, "unknown LOG_LEVEL '%s', using info\n", cfg.log_level.c_str());
+        level = spdlog::level::info;
+    }
+    log->set_level(level);
 
     if (arg == "--healthcheck") {
         const int rc = healthcheck(cfg, log);
@@ -84,6 +92,7 @@ int main(int argc, char** argv) {
         ctx.shutdown();
     } catch (const std::exception& e) {
         log->error("fatal: {}", e.what());
+        curl_global_cleanup();
         return 1;
     }
 

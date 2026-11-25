@@ -179,6 +179,17 @@ void test_format() {
     CHECK_EQ(yacm::util::user_tag(User{1, false, "Ada", "", "", ""}),
              "<a href=\"tg://user?id=1\">Ada</a>");
 
+    using yacm::tg::Chat;
+    // public chat: the name becomes a t.me link
+    CHECK_EQ(yacm::util::chat_display(Chat{-100, "supergroup", "My Group", "my_group"}, ""),
+             "<a href=\"https://t.me/my_group\">My Group</a>");
+    // no username: plain (escaped) title
+    CHECK_EQ(yacm::util::chat_display(Chat{-100, "group", "My <Group>", ""}, ""),
+             "My &lt;Group&gt;");
+    // empty title: localized fallback
+    CHECK_EQ(yacm::util::chat_display(Chat{-100, "supergroup", "", ""}, "Untitled"),
+             "Untitled");
+
     const std::string d = yacm::util::format_date(1700000000);
     CHECK_EQ(d.size(), 16u);          // "YYYY-MM-DD HH:MM"
     CHECK_EQ(d.substr(4, 1), "-");
@@ -218,6 +229,12 @@ void test_i18n() {
              "{0} reported {1} in {2}. Link: {3}");
     CHECK_EQ(strings.t("en", "settings.reports_set"), "✓ Reports are {0}");
     CHECK_EQ(strings.t("en", "errors.report_self"), "You cannot report your own message.");
+    // report hardening: bot/owner/admin targets + already-reported acks
+    CHECK_EQ(strings.t("en", "errors.cannot_report_bot"), "You cannot report the bot.");
+    CHECK_EQ(strings.t("en", "errors.report_already"),
+             "You have already reported this message.");
+    CHECK_EQ(strings.t("en", "errors.report_already_target"),
+             "You have already reported this user.");
     // step 8 keys
     CHECK_EQ(strings.t("en", "settings.title"), "Settings for {0}:");
     CHECK_EQ(strings.t("en", "settings.answer_set"), "✓ Answers are {0} for /{1}");
@@ -268,7 +285,7 @@ private:
 
 void test_db_migrations() {
     TempDatabase tmp;
-    CHECK_EQ(tmp.db().schema_version(), 2);
+    CHECK_EQ(tmp.db().schema_version(), 3);
     for (const char* table : {"users", "chats", "warns", "mutes", "bans", "reports",
                               "audit", "members", "answers"}) {
         CHECK(tmp.db().table_exists(table));
@@ -285,7 +302,7 @@ void test_db_creates_parent_dir() {
         db.open();  // must create base/sub/dir on its own
         db.migrate();
         CHECK(std::filesystem::exists(nested));
-        CHECK_EQ(db.schema_version(), 2);
+        CHECK_EQ(db.schema_version(), 3);
     }
     std::error_code ec;
     std::filesystem::remove_all(base, ec);
@@ -309,6 +326,19 @@ void test_user_repo() {
     yacm::tg::User renamed{42, false, "Ada", "Byron", "ada", ""};
     repo.upsert(renamed, 222);
     CHECK_EQ(repo.find_by_id(42)->last_name, "Byron");
+
+    // Several users without a username must coexist (stored as NULL, not
+    // '', which used to collide on the unique username index).
+    repo.upsert(yacm::tg::User{50, false, "NoName1", "", "", ""}, 300);
+    repo.upsert(yacm::tg::User{51, false, "NoName2", "", "", ""}, 300);
+    CHECK(repo.find_by_id(50).has_value());
+    CHECK(repo.find_by_id(51).has_value());
+    CHECK(!repo.find_by_username(""));
+
+    // A username that moved to another account is released by the stale row.
+    repo.upsert(yacm::tg::User{60, false, "Grace", "", "ADA", ""}, 400);
+    CHECK_EQ(repo.find_by_username("ada")->id, 60);
+    CHECK(repo.find_by_id(42)->username.empty());
 }
 
 void test_chat_repo() {
@@ -415,6 +445,18 @@ void test_member_cache() {
     // promotion write-through: member becomes admin
     repo.upsert_member(-100, 3, "administrator", 20, std::nullopt);
     CHECK_EQ(repo.member_status(-100, 3), std::optional<std::string>("administrator"));
+
+    // Posting a message never downgrades a cached admin/creator, only
+    // revives users cached as gone, and never invents a row.
+    repo.mark_member_active(-100, 1, 30);
+    repo.mark_member_active(-100, 3, 30);
+    repo.mark_member_active(-100, 4, 30);
+    repo.mark_member_active(-100, 999, 30);
+    CHECK_EQ(repo.member_status(-100, 1), std::optional<std::string>("creator"));
+    CHECK_EQ(repo.member_status(-100, 3), std::optional<std::string>("administrator"));
+    CHECK_EQ(repo.member_status(-100, 4), std::optional<std::string>("member"));
+    CHECK(!repo.member_status(-100, 999));
+    CHECK_EQ(repo.member_entry(-100, 4)->updated_at, 30);
     CHECK_EQ(repo.admins(-100).size(), 3u);
 }
 
@@ -488,17 +530,17 @@ void test_report_repo() {
     TempDatabase tmp;
     yacm::storage::ReportRepo repo(tmp.db());
 
-    CHECK(!repo.already_reported(7, 42));
+    CHECK(!repo.already_reported(-100, 7, 42));
     repo.add(-100, 42, 7, 8, 1000);
-    CHECK(repo.already_reported(7, 42));
+    CHECK(repo.already_reported(-100, 7, 42));
 
     // another user may report the same message
     repo.add(-100, 42, 9, 8, 2000);
-    CHECK(repo.already_reported(9, 42));
+    CHECK(repo.already_reported(-100, 9, 42));
 
     // same user, a different message — a new report
     repo.add(-100, 43, 7, 8, 3000);
-    CHECK(repo.already_reported(7, 43));
+    CHECK(repo.already_reported(-100, 7, 43));
 
     // a repeated report is a no-op, not an error (INSERT OR IGNORE)
     repo.add(-100, 42, 7, 8, 4000);
@@ -508,6 +550,25 @@ void test_report_repo() {
         "SELECT COUNT(*) FROM reports WHERE message_id = 42 AND reporter_id = 7");
     CHECK(st.step());
     CHECK_EQ(st.col_int(0), 1);
+
+    // per-chat target dedup: the same reporter can't spam the same user
+    CHECK(repo.already_reported_target(-100, 7, 8));   // reported already
+    CHECK(!repo.already_reported_target(-100, 7, 9));  // different target
+    CHECK(!repo.already_reported_target(-200, 7, 8));  // different chat
+    repo.add(-200, 55, 7, 8, 5000);
+    CHECK(repo.already_reported_target(-200, 7, 8));
+    CHECK(repo.already_reported(-200, 7, 55));
+
+    // message ids are per chat: message 42 of another chat is a different
+    // message and its report must be stored, not swallowed by the dedup
+    CHECK(!repo.already_reported(-200, 7, 42));
+    repo.add(-200, 42, 7, 10, 6000);
+    CHECK(repo.already_reported(-200, 7, 42));
+    yacm::storage::Statement st2(tmp.db().raw(),
+                                 "SELECT COUNT(*) FROM reports WHERE message_id = 42 "
+                                 "AND reporter_id = 7");
+    CHECK(st2.step());
+    CHECK_EQ(st2.col_int(0), 2);
 }
 
 void test_transaction() {
@@ -590,6 +651,18 @@ void test_router() {
     m.text = "/start@SomeBot args";
     CHECK(reg.dispatch(m));
     CHECK_EQ(start_calls, 2);
+
+    // Once the bot knows its own username, commands addressed to another
+    // bot are ignored; its own @suffix (any case) still works.
+    reg.set_bot_username("Test_Bot");
+    m.text = "/start@SomeBot args";
+    CHECK(!reg.dispatch(m));
+    CHECK_EQ(start_calls, 2);
+    m.text = "/start@test_bot args";
+    CHECK(reg.dispatch(m));
+    m.text = "/start args";
+    CHECK(reg.dispatch(m));
+    CHECK_EQ(start_calls, 4);
 
     m.text = "not a command";
     CHECK(!reg.dispatch(m));
@@ -766,7 +839,16 @@ void test_moderation_service() {
     CHECK(mute_r2.ok);
     CHECK_EQ(fake.restricts.size(), 2u);
     CHECK(fake.restricts[1].until_date > 0);  // now + duration
-    CHECK_EQ(*mutes.until(kChat, 5), 3600);
+    // the DB stores the absolute expiry (same value sent to Telegram), not
+    // the duration
+    CHECK_EQ(*mutes.until(kChat, 5), static_cast<int64_t>(fake.restricts[1].until_date));
+    CHECK(*mutes.until(kChat, 5) > 3600);
+
+    // > 366 days would be permanent on Telegram's side: rejected, no API call
+    const auto mute_long = svc.mute(kChat, 1, 5, Role::Everyone, 400LL * 86400, "x");
+    CHECK(!mute_long.ok);
+    CHECK_EQ(mute_long.error_key, "errors.invalid_duration");
+    CHECK_EQ(fake.restricts.size(), 2u);
 
     // unmute: fresh permissions that restore sending + mutes row dropped
     const auto unmute_r = svc.unmute(kChat, 1, 4, Role::Everyone);
@@ -855,6 +937,20 @@ void test_roles_live() {
     CHECK(roles.resolve(kChat, stranger) == Role::Everyone);
     CHECK_EQ(fake.chat_member_queries.size(), 2u);
     CHECK(!users.member_status(kChat, 99));
+
+    // A stale cached "administrator" (demoted while the bot was not
+    // watching) is re-validated live instead of being trusted forever.
+    const yacm::tg::User demoted{55, false, "Demoted", "", "", ""};
+    users.upsert_member(kChat, 55, "administrator", /*now=*/1, std::nullopt);
+    fake.members[{kChat, 55}] = {demoted, "member"};
+    CHECK(roles.resolve(kChat, demoted) == Role::Everyone);
+    CHECK_EQ(fake.chat_member_queries.size(), 3u);
+    CHECK_EQ(users.member_status(kChat, 55), std::optional<std::string>("member"));
+
+    // ...and when it cannot be re-validated it fails closed.
+    users.upsert_member(kChat, 56, "administrator", /*now=*/1, std::nullopt);
+    CHECK(roles.resolve(kChat, yacm::tg::User{56, false, "X", "", "", ""}) ==
+          Role::Everyone);
 }
 
 void test_warn_limit_action() {

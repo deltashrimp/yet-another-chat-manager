@@ -37,7 +37,14 @@ public:
                            Role target_role);
     ModerationResult kick(int64_t chat_id, int64_t actor_id, int64_t target_id,
                           Role target_role, const std::string& reason);
-    // until_s: 0 = forever (until /unmute).
+    // Telegram treats restrictions shorter than 30 s or longer than 366 days
+    // as permanent: longer mutes are rejected (errors.invalid_duration),
+    // shorter ones are padded up to kMinMuteSeconds.
+    static constexpr int64_t kMinMuteSeconds = 35;
+    static constexpr int64_t kMaxMuteSeconds = 366LL * 24 * 3600;
+
+    // until_s: duration in seconds, 0 = forever (until /unmute). The mutes
+    // table stores the absolute expiry timestamp (0 = forever).
     ModerationResult mute(int64_t chat_id, int64_t actor_id, int64_t target_id,
                           Role target_role, int64_t until_s, const std::string& reason);
     ModerationResult unmute(int64_t chat_id, int64_t actor_id, int64_t target_id,

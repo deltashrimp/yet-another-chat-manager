@@ -140,13 +140,27 @@ ModerationResult ModerationService::kick(int64_t chat_id, int64_t actor_id, int6
 ModerationResult ModerationService::mute(int64_t chat_id, int64_t actor_id, int64_t target_id,
                                          Role target_role, int64_t until_s,
                                          const std::string& reason) {
+    if (until_s < 0) until_s = 0;
     ModerationResult r;
     check_target(chat_id, target_id, target_role, r);
     if (!r.ok) return r;
 
+    if (until_s > kMaxMuteSeconds) {
+        // Telegram silently turns such a restriction into a permanent one.
+        r.ok = false;
+        r.error_key = "errors.invalid_duration";
+        return r;
+    }
+    // Telegram also treats "less than 30 seconds from now" as forever; pad
+    // short mutes so request latency can't turn "/mute 30s" into a ban on
+    // speaking for life.
+    if (until_s > 0 && until_s < kMinMuteSeconds) until_s = kMinMuteSeconds;
+
+    const int64_t now = unix_now();
+    const int64_t until = until_s > 0 ? now + until_s : 0;  // absolute; 0 = forever
     try {
-        const int64_t until = until_s > 0 ? unix_now() + until_s : 0;
-        client_.restrict_chat_member(chat_id, target_id, until, kMutePermissions);
+        client_.restrict_chat_member(chat_id, target_id, static_cast<long>(until),
+                                     kMutePermissions);
     } catch (const std::exception& e) {
         spdlog::warn("restrictChatMember (mute) failed for {} in {}: {}", target_id, chat_id,
                      e.what());
@@ -155,9 +169,8 @@ ModerationResult ModerationService::mute(int64_t chat_id, int64_t actor_id, int6
         return r;
     }
 
-    const int64_t now = unix_now();
     storage::Transaction tx(db_);
-    mutes_.set(chat_id, target_id, until_s, reason, actor_id, now);
+    mutes_.set(chat_id, target_id, until, reason, actor_id, now);
     audit_.log(chat_id, actor_id, "mute", target_id, reason, now);
     tx.commit();
     return r;

@@ -70,6 +70,12 @@ std::optional<storage::UserRow> resolve_user_ref(app::AppContext& ctx, const tg:
             return ctx.users->find_by_username(ref.username);
         case UserRef::Kind::Reply:
         case UserRef::Kind::Invalid:
+            // Only an *empty* reference means "the replied-to user". A typo'd
+            // explicit target ("/ban @bad name" -> "bad") must not silently
+            // hit whoever the command happens to reply to.
+            if (ref.kind == UserRef::Kind::Invalid && !util::trim(args).empty()) {
+                return std::nullopt;
+            }
             if (m.reply_to && m.reply_to->from) {
                 return ctx.users->find_by_id(m.reply_to->from->id);
             }
@@ -79,7 +85,7 @@ std::optional<storage::UserRow> resolve_user_ref(app::AppContext& ctx, const tg:
 }
 
 std::string user_handle(const storage::UserRow& row) {
-    if (!row.username.empty()) return "@" + row.username;
+    if (!row.username.empty()) return "@" + util::html_escape(row.username);
 
     std::string name = row.first_name;
     if (!row.last_name.empty()) {

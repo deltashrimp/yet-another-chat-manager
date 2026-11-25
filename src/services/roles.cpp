@@ -41,19 +41,27 @@ Role Roles::resolve(int64_t chat_id, const tg::User& user) const {
     }
     if (chat_id >= 0) return Role::Everyone;  // private chat
 
-    if (const auto status = users_.member_status(chat_id, user.id)) {
-        return role_from_status(*status);
+    const int64_t now = unix_now();
+    const auto cached = users_.member_entry(chat_id, user.id);
+    // A fresh cache entry is trusted as-is. Stale entries are re-checked:
+    // promotions/demotions are only pushed to the bot (chat_member updates)
+    // while it is an admin, so an old "administrator" row could otherwise
+    // keep granting rights to someone who was demoted long ago.
+    if (cached && now - cached->updated_at < kCacheTtlSeconds) {
+        return role_from_status(cached->status);
     }
 
-    // Cache miss -> live call, write-through to the cache so the next check
-    // (and any other command in this chat) hits the DB.
+    // Cache miss / stale -> live call, write-through to the cache so the
+    // next check (and any other command in this chat) hits the DB.
     try {
         const tg::ChatMember member = client_.get_chat_member(chat_id, user.id);
-        users_.upsert_member(chat_id, user.id, member.status, unix_now(), std::nullopt);
+        users_.upsert_member(chat_id, user.id, member.status, now, std::nullopt);
         return role_from_status(member.status);
     } catch (const std::exception& e) {
         spdlog::debug("getChatMember failed for {} in {}: {}", user.id, chat_id, e.what());
     }
+    // Fail closed: a stale privileged entry is not trusted when it cannot
+    // be re-validated (the admin can simply retry the command).
     return Role::Everyone;
 }
 

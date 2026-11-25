@@ -24,9 +24,18 @@ std::string html_escape(std::string s) {
 }
 
 std::string user_tag(const tg::User& user) {
-    if (!user.username.empty()) return "@" + user.username;
+    if (!user.username.empty()) return "@" + html_escape(user.username);
     return "<a href=\"tg://user?id=" + std::to_string(user.id) + "\">" +
            html_escape(display_name(user)) + "</a>";
+}
+
+std::string chat_display(const tg::Chat& chat, const std::string& fallback_title) {
+    std::string title = chat.title.empty() ? fallback_title : chat.title;
+    std::string escaped = html_escape(std::move(title));
+    if (!chat.username.empty()) {
+        return "<a href=\"https://t.me/" + html_escape(chat.username) + "\">" + escaped + "</a>";
+    }
+    return escaped;
 }
 
 std::string display_name(const tg::User& user) {
@@ -47,7 +56,11 @@ std::string display_name_or_id(const tg::User& user) {
 std::string format_date(int64_t unix_seconds) {
     const std::time_t t = static_cast<std::time_t>(unix_seconds);
     std::tm tm{};
+#ifdef _WIN32
+    localtime_s(&tm, &t);
+#else
     localtime_r(&t, &tm);
+#endif
     char buf[32];
     std::strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M", &tm);
     return buf;

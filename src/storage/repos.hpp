@@ -20,6 +20,12 @@ struct UserRow {
     int64_t first_seen_at = 0;
 };
 
+// A cached `members` row: status plus when it was last confirmed.
+struct MemberEntry {
+    std::string status;
+    int64_t updated_at = 0;
+};
+
 class UserRepo {
 public:
     explicit UserRepo(Database& db);
@@ -38,6 +44,14 @@ public:
     // "member" | "restricted" | "left" | "kicked"), or nullopt when the bot
     // has never seen that member in the chat.
     std::optional<std::string> member_status(int64_t chat_id, int64_t user_id) const;
+
+    // Same as member_status(), plus the time the status was last written.
+    std::optional<MemberEntry> member_entry(int64_t chat_id, int64_t user_id) const;
+
+    // The user just posted in the chat: a cached "left"/"kicked" row flips
+    // back to "member". Any other cached status (notably creator/admin) is
+    // left untouched and no row is created for an unknown user.
+    void mark_member_active(int64_t chat_id, int64_t user_id, int64_t now);
 
     // Users cached as admins (creator/administrator) of a chat, creator
     // first. Used as a fallback when the live administrator list is
@@ -154,7 +168,8 @@ private:
 
 // Reports of messages (step 6). Spec §3: one report per (reporter, message)
 // — a repeated report of the same message by the same user is ignored.
-// The table's UNIQUE (reporter_id, message_id) constraint enforces that.
+// The table's UNIQUE (chat_id, reporter_id, message_id) constraint enforces
+// that (message ids are only unique within one chat).
 class ReportRepo {
 public:
     explicit ReportRepo(Database& db);
@@ -164,8 +179,13 @@ public:
     void add(int64_t chat_id, int64_t message_id, int64_t reporter_id,
              int64_t target_id, int64_t created_at);
 
-    // True when the reporter already reported this message (any chat).
-    bool already_reported(int64_t reporter_id, int64_t message_id) const;
+    // True when the reporter already reported this message of this chat.
+    bool already_reported(int64_t chat_id, int64_t reporter_id, int64_t message_id) const;
+
+    // True when the reporter already reported this target user in this
+    // chat (any message) — blocks spam re-reports about the same user.
+    bool already_reported_target(int64_t chat_id, int64_t reporter_id,
+                                 int64_t target_id) const;
 
 private:
     Database& db_;
