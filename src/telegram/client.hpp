@@ -41,13 +41,16 @@ public:
                                  std::optional<int64_t> reply_to_message_id = std::nullopt,
                                  long timeout_s = 30) = 0;
     virtual void delete_message(int64_t chat_id, int64_t message_id) = 0;
+    // "typing" etc. Default: no-op (fakes don't need it).
+    virtual void send_chat_action(int64_t /*chat_id*/, const std::string& /*action*/) {}
 
     virtual Chat get_chat(int64_t chat_id) = 0;
     virtual ChatMember get_chat_member(int64_t chat_id, int64_t user_id) = 0;
     virtual std::vector<ChatMember> get_chat_administrators(int64_t chat_id) = 0;
 
-    virtual void ban_chat_member(int64_t chat_id, int64_t user_id,
-                                 const std::string& reason) = 0;
+    // until_date: absolute unix time the ban expires, 0 = forever.
+    virtual void ban_chat_member(int64_t chat_id, int64_t user_id, const std::string& reason,
+                                 long until_date = 0) = 0;
     virtual void unban_chat_member(int64_t chat_id, int64_t user_id) = 0;
     virtual void restrict_chat_member(int64_t chat_id, int64_t user_id, long until_date,
                                       const nlohmann::json& permissions) = 0;
@@ -74,12 +77,14 @@ public:
                          std::optional<int64_t> reply_to_message_id = std::nullopt,
                          long timeout_s = 30) override;
     void delete_message(int64_t chat_id, int64_t message_id) override;
+    void send_chat_action(int64_t chat_id, const std::string& action) override;
 
     Chat get_chat(int64_t chat_id) override;
     ChatMember get_chat_member(int64_t chat_id, int64_t user_id) override;
     std::vector<ChatMember> get_chat_administrators(int64_t chat_id) override;
 
-    void ban_chat_member(int64_t chat_id, int64_t user_id, const std::string& reason) override;
+    void ban_chat_member(int64_t chat_id, int64_t user_id, const std::string& reason,
+                         long until_date = 0) override;
     void unban_chat_member(int64_t chat_id, int64_t user_id) override;
     void restrict_chat_member(int64_t chat_id, int64_t user_id, long until_date,
                               const nlohmann::json& permissions) override;

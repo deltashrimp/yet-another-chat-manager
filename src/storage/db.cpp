@@ -299,6 +299,41 @@ std::vector<std::pair<int, std::string>> Database::migrations() {
             ALTER TABLE reports_v3 RENAME TO reports;
             CREATE INDEX idx_reports_chat ON reports (chat_id);
         )sql"},
+        {4, R"sql(
+            -- Timed warn modes (tban / tmute <duration>).
+            ALTER TABLE chats ADD COLUMN warn_action_duration INTEGER NOT NULL DEFAULT 0;
+
+            -- Antiflood: consecutive-message limit (0 = off), timed limit
+            -- (N messages within S seconds; 0 = off), the action and
+            -- whether the whole flood is deleted or only the excess.
+            ALTER TABLE chats ADD COLUMN flood_limit INTEGER NOT NULL DEFAULT 0;
+            ALTER TABLE chats ADD COLUMN flood_timer_count INTEGER NOT NULL DEFAULT 0;
+            ALTER TABLE chats ADD COLUMN flood_timer_seconds INTEGER NOT NULL DEFAULT 0;
+            ALTER TABLE chats ADD COLUMN flood_action TEXT NOT NULL DEFAULT 'mute';
+            ALTER TABLE chats ADD COLUMN flood_action_duration INTEGER NOT NULL DEFAULT 0;
+            ALTER TABLE chats ADD COLUMN flood_clear INTEGER NOT NULL DEFAULT 0;
+        )sql"},
+        {5, R"sql(
+            -- AI assistant: allowed in the chat at all (/ai), and whether it
+            -- answers mentions / replies to the bot on its own.
+            ALTER TABLE chats ADD COLUMN ai_enabled INTEGER NOT NULL DEFAULT 1;
+            ALTER TABLE chats ADD COLUMN ai_autoreply INTEGER NOT NULL DEFAULT 0;
+        )sql"},
+        {6, R"sql(
+            -- Users the bot ignores everywhere (/gbban, bot owner only).
+            CREATE TABLE global_bans (
+                user_id    INTEGER PRIMARY KEY,
+                reason     TEXT,
+                created_by INTEGER NOT NULL,
+                created_at INTEGER NOT NULL
+            );
+
+            -- Bot-wide switches (e.g. ai_debug), key -> value.
+            CREATE TABLE bot_settings (
+                key   TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            );
+        )sql"},
     };
 }
 

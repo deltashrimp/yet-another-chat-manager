@@ -3,6 +3,7 @@ internal/
 
 # Configs and unique files
 resources/welcome-message.md
+resources/personality
 
 # Environment and secrets
 .env
@@ -20,6 +21,3 @@ data/
 *.db
 *.db-wal
 *.db-shm
-
-# Repowise local store
-.repowise/

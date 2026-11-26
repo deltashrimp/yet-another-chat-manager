@@ -3,6 +3,10 @@
 #include "config/config.hpp"
 #include "i18n/strings.hpp"
 #include "router/router.hpp"
+#include "services/ai.hpp"
+#include "services/antiflood.hpp"
+#include "services/history.hpp"
+#include "services/throttle.hpp"
 #include "services/moderation.hpp"
 #include "services/roles.hpp"
 #include "services/warns.hpp"
@@ -57,14 +61,26 @@ public:
     std::unique_ptr<storage::ReportRepo> reports;
     std::unique_ptr<storage::AnswerRepo> answers;
     std::unique_ptr<storage::AuditRepo> audit;
+    std::unique_ptr<storage::GlobalBanRepo> global_bans;
+    std::unique_ptr<storage::BotSettingsRepo> bot_settings;
     std::unique_ptr<services::Roles> roles;
     std::unique_ptr<services::ModerationService> moderation;
     std::unique_ptr<services::WarnService> warn_service;
+    services::FloodTracker flood;
+    services::CommandThrottle command_throttle;  // >5 commands in 2 s -> ignored 10 s
+    services::ChatHistory history{5};            // AI context: last 5 messages per chat
+    std::atomic<bool> ai_debug{false};           // /aidebug: append tokens + time
+    // AI assistant; all null while AI_API_KEY is unset.
+    std::unique_ptr<ai::AiClient> ai_client;
+    std::unique_ptr<ai::Assistant> assistant;
+    std::unique_ptr<ai::RateLimiter> ai_limiter;
+    std::unique_ptr<ai::Worker> ai_worker;
     router::HandlerRegistry router;
     std::string welcome_message;
     std::string version;
     std::string build_date;
     int64_t bot_id = 0;  // own user id (for "cannot moderate the bot" checks)
+    std::string bot_username;  // own username without '@' (AI mention detection)
 
 private:
     void process_update(const tg::Update& update);

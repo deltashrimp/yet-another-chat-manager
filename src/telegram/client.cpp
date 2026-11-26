@@ -116,6 +116,10 @@ void Client::delete_message(int64_t chat_id, int64_t message_id) {
     call("deleteMessage", {{"chat_id", chat_id}, {"message_id", message_id}});
 }
 
+void Client::send_chat_action(int64_t chat_id, const std::string& action) {
+    call("sendChatAction", {{"chat_id", chat_id}, {"action", action}}, 10);
+}
+
 Chat Client::get_chat(int64_t chat_id) {
     return call("getChat", {{"chat_id", chat_id}}).get<Chat>();
 }
@@ -130,8 +134,12 @@ std::vector<ChatMember> Client::get_chat_administrators(int64_t chat_id) {
         .get<std::vector<ChatMember>>();
 }
 
-void Client::ban_chat_member(int64_t chat_id, int64_t user_id, const std::string& reason) {
-    call("banChatMember", {{"chat_id", chat_id}, {"user_id", user_id}, {"reason", reason}});
+void Client::ban_chat_member(int64_t chat_id, int64_t user_id, const std::string& reason,
+                             long until_date) {
+    (void)reason;  // the Bot API has no reason field; it lives in the bans table/audit
+    nlohmann::json params = {{"chat_id", chat_id}, {"user_id", user_id}};
+    if (until_date > 0) params["until_date"] = until_date;
+    call("banChatMember", params);
 }
 
 void Client::unban_chat_member(int64_t chat_id, int64_t user_id) {

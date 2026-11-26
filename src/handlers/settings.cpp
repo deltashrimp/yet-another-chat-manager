@@ -3,6 +3,8 @@
 #include "app/app_context.hpp"
 #include "handlers/common.hpp"
 #include "router/router.hpp"
+#include "storage/repos.hpp"
+#include "services/moderation.hpp"
 #include "services/roles.hpp"
 #include "telegram/types.hpp"
 #include "util/format.hpp"
@@ -50,16 +52,31 @@ void on_warnsetaction(AppContext& ctx, const tg::Message& m, const std::string& 
     if (!require_role(ctx, m, services::Role::Owner)) return;
     if (!m.chat) return;
 
-    const std::string action = to_lower(util::trim(args));
-    if (action != "ban" && action != "kick" && action != "mute") {
+    const auto action = util::parse_action(args);
+    if (!action || (action->timed() &&
+                    !services::ModerationService::clamp_duration(action->duration_s))) {
         reply_error(ctx, m, "errors.invalid_warn_action");
         return;
     }
-    ctx.chats->set_warn_action(m.chat->id, action);
+    ctx.chats->set_warn_action(m.chat->id, action->name(), action->duration_s);
     if (!success_answers_on(ctx, m, "warnsetaction")) return;
     reply(ctx, m,
           fmt::format(fmt::runtime(ctx.i18n.t(chat_lang(ctx, m), "settings.warn_action_set")),
-                      action));
+                      action->describe()));
+}
+
+// /warnings (admin, group): the chat's warn configuration.
+void on_warnings(AppContext& ctx, const tg::Message& m, const std::string& /*args*/) {
+    if (!require_group(ctx, m)) return;
+    if (!require_role(ctx, m, services::Role::Admin)) return;
+    if (!m.chat) return;
+
+    const std::string lang = chat_lang(ctx, m);
+    const storage::ChatSettings s = ctx.chats->settings(m.chat->id);
+    const util::Action action = util::action_from_db(s.warn_action, s.warn_action_duration);
+    reply(ctx, m,
+          fmt::format(fmt::runtime(ctx.i18n.t(lang, "warns.config")), s.warn_limit,
+                      action.describe()));
 }
 
 // --- /lang (owner, spec §6.1) ----------------------------------------------
@@ -156,6 +173,11 @@ bool is_answer_forbidden(const std::string& command) {
     static const std::vector<std::string> forbidden = {
         "answer", "answerlist", "start", "help", "ping", "version", "id",
         "idg", "admins", "rules", "report",
+        // read-only views and silent actions never send a success answer
+        "settings", "warnings", "warnlist", "warns", "flood",
+        "sban", "smute", "skick", "swarn",
+        // the AI reply is the answer itself
+        "ai", "aireload", "aidebug", "gbban", "ungbban",
     };
     return std::find(forbidden.begin(), forbidden.end(), command) != forbidden.end();
 }
@@ -230,7 +252,17 @@ void on_settings(AppContext& ctx, const tg::Message& m, const std::string& /*arg
     text += fmt::format(fmt::runtime(ctx.i18n.t(lang, "settings.warn_limit")), s.warn_limit) +
             "\n";
     text += fmt::format(fmt::runtime(ctx.i18n.t(lang, "settings.warn_action")),
-                        s.warn_action) +
+                        util::action_from_db(s.warn_action, s.warn_action_duration)
+                            .describe()) +
+            "\n";
+    text += fmt::format(fmt::runtime(ctx.i18n.t(lang, "settings.flood")),
+                        ctx.i18n.t(lang, s.flood.enabled() ? "reports.on" : "reports.off")) +
+            "\n";
+    text += fmt::format(fmt::runtime(ctx.i18n.t(lang, "settings.ai")),
+                        ctx.i18n.t(lang, s.ai_enabled ? "reports.on" : "reports.off")) +
+            "\n";
+    text += fmt::format(fmt::runtime(ctx.i18n.t(lang, "settings.ai_autoreply")),
+                        ctx.i18n.t(lang, s.ai_autoreply ? "reports.on" : "reports.off")) +
             "\n";
     text += fmt::format(fmt::runtime(ctx.i18n.t(lang, "settings.rules")), rules);
     reply(ctx, m, text, /*html=*/true);
@@ -267,12 +299,20 @@ void on_answerlist(AppContext& ctx, const tg::Message& m, const std::string& /*a
 }  // namespace
 
 void register_settings(AppContext& ctx) {
-    ctx.router.add("warnsetnumber", [&ctx](const tg::Message& m, const std::string& a) {
-        on_warnsetnumber(ctx, m, a);
-    }, services::Role::Owner);
-    ctx.router.add("warnsetaction", [&ctx](const tg::Message& m, const std::string& a) {
-        on_warnsetaction(ctx, m, a);
-    }, services::Role::Owner);
+    // Rose names (/setwarnlimit, /setwarnmode) are aliases of the originals.
+    for (const char* name : {"warnsetnumber", "setwarnlimit"}) {
+        ctx.router.add(name, [&ctx](const tg::Message& m, const std::string& a) {
+            on_warnsetnumber(ctx, m, a);
+        }, services::Role::Owner);
+    }
+    for (const char* name : {"warnsetaction", "setwarnmode"}) {
+        ctx.router.add(name, [&ctx](const tg::Message& m, const std::string& a) {
+            on_warnsetaction(ctx, m, a);
+        }, services::Role::Owner);
+    }
+    ctx.router.add("warnings", [&ctx](const tg::Message& m, const std::string& a) {
+        on_warnings(ctx, m, a);
+    }, services::Role::Admin);
     ctx.router.add("lang", [&ctx](const tg::Message& m, const std::string& a) {
         on_lang(ctx, m, a);
     }, services::Role::Owner);

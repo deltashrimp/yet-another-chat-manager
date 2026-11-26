@@ -70,6 +70,29 @@ public:
         return static_cast<int64_t>(value);
     }
 
+    std::optional<double> f64(const char* key) const {
+        auto v = str(key);
+        if (!v) return std::nullopt;
+        char* end = nullptr;
+        errno = 0;
+        const double value = std::strtod(v->c_str(), &end);
+        if (errno != 0 || end == v->c_str() || *end != '\0') {
+            throw ConfigError(std::string(key) + " must be a number, got: " + *v);
+        }
+        return value;
+    }
+
+    // Integer in [min, max], or `fallback` when unset.
+    int ranged(const char* key, int fallback, int min, int max) const {
+        auto v = i64(key);
+        if (!v) return fallback;
+        if (*v < min || *v > max) {
+            throw ConfigError(std::string(key) + " must be in [" + std::to_string(min) + ", " +
+                              std::to_string(max) + "], got: " + std::to_string(*v));
+        }
+        return static_cast<int>(*v);
+    }
+
 private:
     const std::map<std::string, std::string>& file_;
 };
@@ -98,6 +121,22 @@ Config from_env(const std::string& dotenv_path) {
         }
         cfg.poll_timeout = static_cast<int>(*v);
     }
+
+    AiConfig& ai = cfg.ai;
+    if (auto v = src.str("AI_API_URL")) ai.api_url = *v;
+    if (auto v = src.str("AI_API_KEY")) ai.api_key = *v;
+    if (auto v = src.str("AI_MODEL")) ai.model = *v;
+    if (auto v = src.str("AI_RULES")) ai.rules = *v;
+    if (auto v = src.str("AI_BIO")) ai.bio = *v;
+    ai.max_tokens = src.ranged("AI_MAX_TOKENS", ai.max_tokens, 1, 100000);
+    ai.temperature = src.f64("AI_TEMPERATURE");
+    ai.top_p = src.f64("AI_TOP_P");
+    ai.frequency_penalty = src.f64("AI_FREQUENCY_PENALTY");
+    ai.presence_penalty = src.f64("AI_PRESENCE_PENALTY");
+    ai.timeout_s = src.ranged("AI_TIMEOUT", ai.timeout_s, 1, 600);
+    ai.user_cooldown_s = src.ranged("AI_USER_COOLDOWN", ai.user_cooldown_s, 0, 86400);
+    ai.chat_per_min = src.ranged("AI_CHAT_PER_MIN", ai.chat_per_min, 1, 1000);
+    ai.queue_limit = src.ranged("AI_QUEUE_LIMIT", ai.queue_limit, 1, 10000);
 
     return cfg;
 }

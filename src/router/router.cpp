@@ -37,6 +37,17 @@ void HandlerRegistry::add(const std::string& name, Handler handler,
     commands_[name] = Command{std::move(handler), min_role, dm_only};
 }
 
+bool HandlerRegistry::is_own_command(const tg::Message& message) const {
+    if (!message.is_command()) return false;
+    const auto parsed = parse_command(message.text);
+    if (!parsed) return false;
+    if (!bot_username_.empty()) {
+        const std::string addressee = parse_addressee(message.text);
+        if (!addressee.empty() && lower(addressee) != bot_username_) return false;
+    }
+    return commands_.count(parsed->first) > 0;
+}
+
 bool HandlerRegistry::dispatch(const tg::Message& message) const {
     if (!message.is_command()) return false;
     auto parsed = parse_command(message.text);

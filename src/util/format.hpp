@@ -21,6 +21,9 @@ std::string user_tag(const tg::User& user);
 // falls back to `fallback_title` (escaped). Always safe for Telegram HTML.
 std::string chat_display(const tg::Chat& chat, const std::string& fallback_title);
 
+// Plain-text author tag: "@username", or the display name (no HTML).
+std::string author_handle(const tg::User& user);
+
 // Raw display name: "First Last".
 std::string display_name(const tg::User& user);
 

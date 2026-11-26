@@ -55,7 +55,7 @@ RUN chmod +x /app/entrypoint.sh
 # ./data to /data and overrides the local ./.env paths via `environment:`.
 ENV DB_PATH=/data/bot.db \
     I18N_DIR=/app/i18n \
-    WELCOME_MESSAGE=/app/resources/welcome-message.md \
+    WELCOME_MESSAGE=/app/resources/welcome-message-public.md \
     DEFAULT_LANG=en \
     LOG_LEVEL=info \
     POLL_TIMEOUT=30

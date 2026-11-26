@@ -4,8 +4,10 @@
 #include "storage/db.hpp"
 #include "storage/repos.hpp"
 #include "telegram/client.hpp"
+#include "util/parsers.hpp"
 
 #include <cstdint>
+#include <optional>
 #include <string>
 
 namespace yacm::services {
@@ -31,8 +33,10 @@ public:
     void check_target(int64_t chat_id, int64_t target_id, Role target_role,
                       ModerationResult& result) const;
 
+    // duration_s: 0 = permanent ban, otherwise a temporary ban (tban) with
+    // the same bounds as mutes.
     ModerationResult ban(int64_t chat_id, int64_t actor_id, int64_t target_id,
-                         Role target_role, const std::string& reason);
+                         Role target_role, const std::string& reason, int64_t duration_s = 0);
     ModerationResult unban(int64_t chat_id, int64_t actor_id, int64_t target_id,
                            Role target_role);
     ModerationResult kick(int64_t chat_id, int64_t actor_id, int64_t target_id,
@@ -49,6 +53,15 @@ public:
                           Role target_role, int64_t until_s, const std::string& reason);
     ModerationResult unmute(int64_t chat_id, int64_t actor_id, int64_t target_id,
                             Role target_role);
+
+    // Runs an automatic punishment (warn limit, antiflood).
+    ModerationResult apply(int64_t chat_id, int64_t actor_id, int64_t target_id,
+                           Role target_role, const util::Action& action,
+                           const std::string& reason);
+
+    // Clamps a temporary restriction to what Telegram honours: > max is
+    // rejected (nullopt), shorter than min is padded. 0 stays 0 (forever).
+    static std::optional<int64_t> clamp_duration(int64_t seconds);
 
 private:
     bool bot_is_admin(int64_t chat_id) const;

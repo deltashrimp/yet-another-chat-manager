@@ -44,7 +44,8 @@ WarnOutcome WarnService::warn(int64_t chat_id, int64_t actor_id, int64_t target_
     // Limit reached: run the chat's configured action (spec §5.6), then
     // reset the warns so the user is not left "overloaded" after the
     // punishment expires.
-    const std::string action = chats_.warn_action(chat_id);
+    const util::Action action =
+        util::action_from_db(chats_.warn_action(chat_id), chats_.warn_action_duration(chat_id));
     const ModerationResult ar = apply_limit_action(chat_id, actor_id, target_id, target_role,
                                                    action, reason);
     if (!ar.ok) {
@@ -57,11 +58,33 @@ WarnOutcome WarnService::warn(int64_t chat_id, int64_t actor_id, int64_t target_
 
     storage::Transaction tx(db_);
     warns_.clear(chat_id, target_id);
-    audit_.log(chat_id, actor_id, "warn_reset", target_id, action, unix_now());
+    audit_.log(chat_id, actor_id, "warn_reset", target_id, action.describe(), unix_now());
     tx.commit();
 
     out.count = 0;
-    out.fired_action = action;
+    out.fired_action = action.name();
+    out.fired_duration = action.duration_s;
+    return out;
+}
+
+WarnOutcome WarnService::reset(int64_t chat_id, int64_t actor_id, int64_t target_id,
+                               Role target_role) {
+    WarnOutcome out;
+    const std::string block = moderation_block(target_id, bot_id_, target_role);
+    if (!block.empty()) {
+        out.error_key = block;
+        return out;
+    }
+
+    storage::Transaction tx(db_);
+    out.removed = warns_.clear(chat_id, target_id);
+    audit_.log(chat_id, actor_id, "resetwarn", target_id, std::to_string(out.removed),
+               unix_now());
+    tx.commit();
+
+    out.ok = true;
+    out.count = 0;
+    out.limit = chats_.warn_limit(chat_id);
     return out;
 }
 
@@ -92,16 +115,9 @@ int WarnService::count(int64_t chat_id, int64_t target_id) const {
 
 ModerationResult WarnService::apply_limit_action(int64_t chat_id, int64_t actor_id,
                                                  int64_t target_id, Role target_role,
-                                                 const std::string& action,
+                                                 const util::Action& action,
                                                  const std::string& reason) const {
-    if (action == "ban") {
-        return moderation_.ban(chat_id, actor_id, target_id, target_role, reason);
-    }
-    if (action == "kick") {
-        return moderation_.kick(chat_id, actor_id, target_id, target_role, reason);
-    }
-    // Default (including the schema default "mute"): mute forever.
-    return moderation_.mute(chat_id, actor_id, target_id, target_role, /*until_s=*/0, reason);
+    return moderation_.apply(chat_id, actor_id, target_id, target_role, action, reason);
 }
 
 int WarnService::warn_limit(int64_t chat_id) const { return chats_.warn_limit(chat_id); }

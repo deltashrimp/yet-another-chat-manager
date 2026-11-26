@@ -60,4 +60,38 @@ std::optional<std::string> parse_lang_token(const std::string& token);
 // std::nullopt for anything else.
 std::optional<bool> parse_yes_no(const std::string& token);
 
+// A punishment applied automatically (warn limit, antiflood): ban, kick,
+// mute, or the timed tban / tmute with a duration.
+struct Action {
+    enum class Kind { Ban, Kick, Mute, TBan, TMute };
+
+    Kind kind = Kind::Mute;
+    int64_t duration_s = 0;  // > 0 only for TBan / TMute
+
+    [[nodiscard]] bool timed() const { return kind == Kind::TBan || kind == Kind::TMute; }
+    // "ban" | "kick" | "mute" | "tban" | "tmute" (the DB representation).
+    [[nodiscard]] std::string name() const;
+    // "tmute 10m", "ban" — human-readable, round-trips through parse_action.
+    [[nodiscard]] std::string describe() const;
+
+    bool operator==(const Action& o) const {
+        return kind == o.kind && duration_s == o.duration_s;
+    }
+};
+
+// Parses "ban", "kick", "mute", "tban 3d", "tmute 10m" (case-insensitive).
+// Timed kinds require a valid duration; the others reject one.
+std::optional<Action> parse_action(const std::string& args);
+
+// Builds an Action from its stored form (name + duration); unknown names
+// fall back to a permanent mute (the schema default).
+Action action_from_db(const std::string& name, int64_t duration_s);
+
+// Inverse of parse_duration_seconds: largest unit that divides evenly
+// ("600" -> "10m", "90" -> "90s", "1209600" -> "2w").
+std::string format_duration(int64_t seconds);
+
+// Parses a positive integer in [min, max]; nullopt otherwise.
+std::optional<int> parse_int_in_range(const std::string& token, int min, int max);
+
 }  // namespace yacm::util

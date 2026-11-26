@@ -4,6 +4,8 @@
 #include "util/format.hpp"
 #include "util/parsers.hpp"
 
+#include <spdlog/spdlog.h>
+
 #include <utility>
 
 namespace yacm::handlers {
@@ -82,6 +84,15 @@ std::optional<storage::UserRow> resolve_user_ref(app::AppContext& ctx, const tg:
             return std::nullopt;
     }
     return std::nullopt;
+}
+
+void try_delete(app::AppContext& ctx, int64_t chat_id, int64_t message_id) {
+    if (message_id <= 0) return;
+    try {
+        ctx.client->delete_message(chat_id, message_id);
+    } catch (const std::exception& e) {
+        ctx.log->debug("deleteMessage {} in {} failed: {}", message_id, chat_id, e.what());
+    }
 }
 
 std::string user_handle(const storage::UserRow& row) {

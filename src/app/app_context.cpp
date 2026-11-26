@@ -1,6 +1,10 @@
 #include "app/app_context.hpp"
 
+#include "handlers/ai.hpp"
+#include "handlers/antiflood.hpp"
 #include "handlers/general.hpp"
+#include "handlers/owner.hpp"
+#include "util/format.hpp"
 #include "handlers/moderation.hpp"
 #include "handlers/settings.hpp"
 #include "version.hpp"
@@ -16,6 +20,12 @@
 
 namespace yacm::app {
 namespace {
+
+int64_t steady_ms() {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+               std::chrono::steady_clock::now().time_since_epoch())
+        .count();
+}
 
 int64_t unix_now() {
     return std::chrono::duration_cast<std::chrono::seconds>(
@@ -73,9 +83,12 @@ void AppContext::init() {
     reports = std::make_unique<storage::ReportRepo>(db);
     answers = std::make_unique<storage::AnswerRepo>(db);
     audit = std::make_unique<storage::AuditRepo>(db);
+    global_bans = std::make_unique<storage::GlobalBanRepo>(db);
+    bot_settings = std::make_unique<storage::BotSettingsRepo>(db);
     roles = std::make_unique<services::Roles>(config, *client, *users);
     const tg::User me = client->get_me();
     bot_id = me.id;
+    bot_username = me.username;
     router.set_bot_username(me.username);  // ignore "/cmd@OtherBot"
     moderation = std::make_unique<services::ModerationService>(*client, bot_id, db, *mutes,
                                                                *bans, *audit);
@@ -92,6 +105,9 @@ void AppContext::init() {
     handlers::register_general(*this);
     handlers::register_moderation(*this);
     handlers::register_settings(*this);
+    handlers::register_antiflood(*this);
+    handlers::register_ai(*this);
+    handlers::register_owner(*this);
 
     sender->start();
     log->info("ready: version={} build={} db={}", version, build_date, config.db_path);
@@ -159,9 +175,43 @@ void AppContext::process_update(const tg::Update& update) {
         } catch (const std::exception& e) {
             log->warn("update #{}: cache bookkeeping failed: {}", update.update_id, e.what());
         }
+        // Globally banned users (/gbban) are ignored entirely: no commands,
+        // no AI, no antiflood, not even AI context.
+        if (m.from && global_bans->is_banned(m.from->id)) {
+            log->debug("update #{}: ignoring globally banned user {}", update.update_id,
+                       m.from->id);
+            return;
+        }
+
+        // Antiflood sees every group message, commands included; a message
+        // that is part of a flood is not dispatched.
+        bool flooded = false;
+        try {
+            flooded = handlers::check_flood(*this, m);
+        } catch (const std::exception& e) {
+            log->warn("update #{}: antiflood check failed: {}", update.update_id, e.what());
+        }
+        if (flooded) return;
+
         if (m.is_command()) {
-            // Unknown / malformed commands are silently ignored.
-            router.dispatch(m);
+            // Only our own registered commands count towards the spam limit
+            // ("/cmd@OtherBot" and unknown commands are ignored anyway).
+            if (m.from && router.is_own_command(m)) {
+                if (command_throttle.allow(m.from->id, steady_ms())) {
+                    router.dispatch(m);
+                } else {
+                    log->debug("update #{}: user {} is sending commands too fast, ignored",
+                               update.update_id, m.from->id);
+                }
+            }
+            return;  // commands are not AI context
+        }
+
+        // AI first, so the context sent with a reply is the messages
+        // *before* this one; then remember this message for later requests.
+        handlers::maybe_ai_reply(*this, m);
+        if (m.chat && m.from && !m.content().empty()) {
+            history.record(m.chat->id, {util::author_handle(*m.from), m.content()});
         }
     }
 
@@ -182,6 +232,9 @@ void AppContext::shutdown() {
     shutdown_done_ = true;
 
     stop_flag_.store(true);
+    // AI first: it aborts the in-flight LLM call and stops producing
+    // messages, then the sender drains what is already queued.
+    if (ai_worker) ai_worker->shutdown();
     if (sender) sender->shutdown();
     db.close();
     log->info("shutdown complete");

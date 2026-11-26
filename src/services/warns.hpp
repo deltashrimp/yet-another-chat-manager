@@ -20,6 +20,8 @@ struct WarnOutcome {
     // When the warn pushed the user to the limit, the chat's configured
     // action ("ban" | "kick" | "mute") fired and the warns were reset to 0.
     std::string fired_action;
+    int64_t fired_duration = 0;  // seconds, for "tban" / "tmute"
+    int removed = 0;             // resetwarn: how many warns were cleared
 };
 
 // /warn /unwarn /warnlist business logic (spec §5.5): hierarchy check,
@@ -37,6 +39,8 @@ public:
                      const std::string& reason);
     WarnOutcome unwarn(int64_t chat_id, int64_t actor_id, int64_t target_id,
                        Role target_role);
+    // Removes every warn of the user (/resetwarn).
+    WarnOutcome reset(int64_t chat_id, int64_t actor_id, int64_t target_id, Role target_role);
 
     int count(int64_t chat_id, int64_t target_id) const;
     int warn_limit(int64_t chat_id) const;
@@ -45,7 +49,7 @@ public:
 private:
     // Fires the configured warn-limit action; returns it via out.
     ModerationResult apply_limit_action(int64_t chat_id, int64_t actor_id, int64_t target_id,
-                                        Role target_role, const std::string& action,
+                                        Role target_role, const util::Action& action,
                                         const std::string& reason) const;
 
     storage::Database& db_;

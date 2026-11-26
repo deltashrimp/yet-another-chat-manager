@@ -68,14 +68,52 @@ bool ModerationService::bot_is_admin(int64_t chat_id) const {
     }
 }
 
+std::optional<int64_t> ModerationService::clamp_duration(int64_t seconds) {
+    if (seconds <= 0) return 0;
+    // Telegram silently turns such a restriction into a permanent one.
+    if (seconds > kMaxMuteSeconds) return std::nullopt;
+    // Telegram also treats "less than 30 seconds from now" as forever; pad
+    // short ones so request latency can't turn "30s" into "for life".
+    if (seconds < kMinMuteSeconds) return kMinMuteSeconds;
+    return seconds;
+}
+
+ModerationResult ModerationService::apply(int64_t chat_id, int64_t actor_id, int64_t target_id,
+                                          Role target_role, const util::Action& action,
+                                          const std::string& reason) {
+    using Kind = util::Action::Kind;
+    switch (action.kind) {
+        case Kind::Ban:
+            return ban(chat_id, actor_id, target_id, target_role, reason);
+        case Kind::TBan:
+            return ban(chat_id, actor_id, target_id, target_role, reason, action.duration_s);
+        case Kind::Kick:
+            return kick(chat_id, actor_id, target_id, target_role, reason);
+        case Kind::TMute:
+            return mute(chat_id, actor_id, target_id, target_role, action.duration_s, reason);
+        case Kind::Mute:
+            break;
+    }
+    return mute(chat_id, actor_id, target_id, target_role, /*until_s=*/0, reason);
+}
+
 ModerationResult ModerationService::ban(int64_t chat_id, int64_t actor_id, int64_t target_id,
-                                        Role target_role, const std::string& reason) {
+                                        Role target_role, const std::string& reason,
+                                        int64_t duration_s) {
     ModerationResult r;
     check_target(chat_id, target_id, target_role, r);
     if (!r.ok) return r;
 
+    const auto clamped = clamp_duration(duration_s);
+    if (!clamped) {
+        r.ok = false;
+        r.error_key = "errors.invalid_duration";
+        return r;
+    }
+    const long until = *clamped > 0 ? static_cast<long>(unix_now() + *clamped) : 0;
+
     try {
-        client_.ban_chat_member(chat_id, target_id, reason);
+        client_.ban_chat_member(chat_id, target_id, reason, until);
     } catch (const std::exception& e) {
         spdlog::warn("banChatMember failed for {} in {}: {}", target_id, chat_id, e.what());
         r.ok = false;
@@ -86,7 +124,7 @@ ModerationResult ModerationService::ban(int64_t chat_id, int64_t actor_id, int64
     const int64_t now = unix_now();
     storage::Transaction tx(db_);
     bans_.set(chat_id, target_id, reason, actor_id, now);
-    audit_.log(chat_id, actor_id, "ban", target_id, reason, now);
+    audit_.log(chat_id, actor_id, *clamped > 0 ? "tban" : "ban", target_id, reason, now);
     tx.commit();
     return r;
 }
@@ -145,16 +183,13 @@ ModerationResult ModerationService::mute(int64_t chat_id, int64_t actor_id, int6
     check_target(chat_id, target_id, target_role, r);
     if (!r.ok) return r;
 
-    if (until_s > kMaxMuteSeconds) {
-        // Telegram silently turns such a restriction into a permanent one.
+    const auto clamped = clamp_duration(until_s);
+    if (!clamped) {
         r.ok = false;
         r.error_key = "errors.invalid_duration";
         return r;
     }
-    // Telegram also treats "less than 30 seconds from now" as forever; pad
-    // short mutes so request latency can't turn "/mute 30s" into a ban on
-    // speaking for life.
-    if (until_s > 0 && until_s < kMinMuteSeconds) until_s = kMinMuteSeconds;
+    until_s = *clamped;
 
     const int64_t now = unix_now();
     const int64_t until = until_s > 0 ? now + until_s : 0;  // absolute; 0 = forever

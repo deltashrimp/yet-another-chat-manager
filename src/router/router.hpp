@@ -35,6 +35,10 @@ public:
     // Returns true when the message contained a registered command.
     bool dispatch(const tg::Message& message) const;
 
+    // True when the message is a registered command addressed to this bot
+    // (not "/cmd@OtherBot", not an unknown command).
+    bool is_own_command(const tg::Message& message) const;
+
     // Commands visible to `role` in `in_private_chat` (used by /help).
     std::vector<std::string> commands_for(services::Role role, bool in_private_chat) const;
 

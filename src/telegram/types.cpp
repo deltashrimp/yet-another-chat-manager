@@ -23,6 +23,7 @@ void from_json(const nlohmann::json& j, ReplyTo& r) {
     r.date = j.value("date", int64_t{0});
     if (j.contains("from")) r.from = j.at("from").get<User>();
     r.text = j.value("text", std::string{});
+    r.caption = j.value("caption", std::string{});
 }
 
 void from_json(const nlohmann::json& j, Message& m) {
@@ -31,6 +32,7 @@ void from_json(const nlohmann::json& j, Message& m) {
     if (j.contains("chat")) m.chat = j.at("chat").get<Chat>();
     if (j.contains("from")) m.from = j.at("from").get<User>();
     m.text = j.value("text", std::string{});
+    m.caption = j.value("caption", std::string{});
     if (j.contains("reply_to_message")) m.reply_to = j.at("reply_to_message").get<ReplyTo>();
     if (j.contains("new_chat_members")) {
         m.new_chat_members = j.at("new_chat_members").get<std::vector<User>>();

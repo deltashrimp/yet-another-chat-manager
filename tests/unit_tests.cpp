@@ -1,5 +1,9 @@
 #include "i18n/strings.hpp"
 #include "router/router.hpp"
+#include "services/ai.hpp"
+#include "services/antiflood.hpp"
+#include "services/history.hpp"
+#include "services/throttle.hpp"
 #include "services/moderation.hpp"
 #include "services/roles.hpp"
 #include "services/warns.hpp"
@@ -10,9 +14,14 @@
 #include "util/format.hpp"
 #include "util/parsers.hpp"
 
+#include <spdlog/spdlog.h>
+
 #include <cstdio>
 #include <cstdlib>
+#include <chrono>
 #include <filesystem>
+#include <fstream>
+#include <thread>
 #include <map>
 #include <memory>
 #include <optional>
@@ -285,7 +294,7 @@ private:
 
 void test_db_migrations() {
     TempDatabase tmp;
-    CHECK_EQ(tmp.db().schema_version(), 3);
+    CHECK_EQ(tmp.db().schema_version(), 6);
     for (const char* table : {"users", "chats", "warns", "mutes", "bans", "reports",
                               "audit", "members", "answers"}) {
         CHECK(tmp.db().table_exists(table));
@@ -302,7 +311,7 @@ void test_db_creates_parent_dir() {
         db.open();  // must create base/sub/dir on its own
         db.migrate();
         CHECK(std::filesystem::exists(nested));
-        CHECK_EQ(db.schema_version(), 3);
+        CHECK_EQ(db.schema_version(), 6);
     }
     std::error_code ec;
     std::filesystem::remove_all(base, ec);
@@ -716,6 +725,7 @@ public:
         int64_t chat_id;
         int64_t user_id;
         std::string reason;
+        long until_date = 0;
     };
     struct RestrictCall {
         int64_t chat_id;
@@ -766,10 +776,10 @@ public:
         admin_queries.push_back(chat_id);
         return admins;
     }
-    void ban_chat_member(int64_t chat_id, int64_t user_id,
-                         const std::string& reason) override {
+    void ban_chat_member(int64_t chat_id, int64_t user_id, const std::string& reason,
+                         long until_date) override {
         if (fail_actions) throw yacm::tg::TelegramError(403, "forbidden");
-        bans.push_back({chat_id, user_id, reason});
+        bans.push_back({chat_id, user_id, reason, until_date});
     }
     void unban_chat_member(int64_t chat_id, int64_t user_id) override {
         if (fail_actions) throw yacm::tg::TelegramError(403, "forbidden");
@@ -1022,6 +1032,515 @@ void test_warn_limit_action() {
     CHECK_EQ(fake.restricts.size(), 1u);     // no new API call
 }
 
+
+// --- Rose-compatible additions: actions, timed bans, antiflood --------------
+
+void test_parse_action() {
+    using yacm::util::Action;
+    using yacm::util::parse_action;
+
+    CHECK(parse_action("ban") == (Action{Action::Kind::Ban, 0}));
+    CHECK(parse_action("KICK") == (Action{Action::Kind::Kick, 0}));
+    CHECK(parse_action(" mute ") == (Action{Action::Kind::Mute, 0}));
+    CHECK(parse_action("tban 3d") == (Action{Action::Kind::TBan, 3 * 86400}));
+    CHECK(parse_action("tmute 10m") == (Action{Action::Kind::TMute, 600}));
+    CHECK(!parse_action(""));
+    CHECK(!parse_action("tban"));         // timed kinds need a duration
+    CHECK(!parse_action("tmute forever"));
+    CHECK(!parse_action("ban 3d"));       // plain kinds reject one
+    CHECK(!parse_action("nuke"));
+
+    CHECK_EQ(parse_action("tmute 90m")->describe(), "tmute 90m");
+    CHECK_EQ(parse_action("tban 2w")->describe(), "tban 2w");
+    CHECK_EQ(parse_action("kick")->describe(), "kick");
+
+    // DB round trip; unknown or duration-less timed names fall back to mute
+    CHECK(yacm::util::action_from_db("tban", 60) == (Action{Action::Kind::TBan, 60}));
+    CHECK(yacm::util::action_from_db("ban", 60) == (Action{Action::Kind::Ban, 0}));
+    CHECK(yacm::util::action_from_db("tmute", 0) == (Action{Action::Kind::Mute, 0}));
+    CHECK(yacm::util::action_from_db("???", 0) == (Action{Action::Kind::Mute, 0}));
+
+    CHECK_EQ(yacm::util::format_duration(600), "10m");
+    CHECK_EQ(yacm::util::format_duration(90), "90s");
+    CHECK_EQ(yacm::util::format_duration(5400), "90m");
+    CHECK_EQ(yacm::util::format_duration(86400), "1d");
+    CHECK_EQ(yacm::util::format_duration(1209600), "2w");
+
+    CHECK_EQ(yacm::util::parse_int_in_range("5", 2, 100), std::optional<int>(5));
+    CHECK(!yacm::util::parse_int_in_range("1", 2, 100));
+    CHECK(!yacm::util::parse_int_in_range("101", 2, 100));
+    CHECK(!yacm::util::parse_int_in_range("5x", 2, 100));
+}
+
+void test_chat_repo_flood() {
+    TempDatabase tmp;
+    yacm::storage::ChatRepo repo(tmp.db());
+
+    // unknown chat: antiflood off, schema defaults
+    auto f = repo.flood_settings(42);
+    CHECK(!f.enabled());
+    CHECK_EQ(f.action, "mute");
+
+    repo.set_flood_limit(42, 5);
+    repo.set_flood_timer(42, 10, 30);
+    repo.set_flood_action(42, "tmute", 600);
+    repo.set_flood_clear(42, true);
+    f = repo.flood_settings(42);
+    CHECK(f.enabled());
+    CHECK_EQ(f.limit, 5);
+    CHECK_EQ(f.timer_count, 10);
+    CHECK_EQ(f.timer_seconds, 30);
+    CHECK_EQ(f.action, "tmute");
+    CHECK_EQ(f.action_duration, 600);
+    CHECK(f.clear);
+    CHECK_EQ(repo.settings(42).flood.limit, 5);
+
+    repo.set_flood_limit(42, 0);
+    repo.set_flood_timer(42, 0, 0);
+    CHECK(!repo.flood_settings(42).enabled());
+
+    // timed warn mode is persisted alongside the action name
+    repo.set_warn_action(42, "tban", 86400);
+    CHECK_EQ(repo.warn_action(42), "tban");
+    CHECK_EQ(repo.warn_action_duration(42), 86400);
+    CHECK_EQ(repo.settings(42).warn_action_duration, 86400);
+    repo.set_warn_action(42, "kick");
+    CHECK_EQ(repo.warn_action_duration(42), 0);
+}
+
+void test_flood_tracker() {
+    using yacm::services::FloodTracker;
+    yacm::storage::FloodSettings s;
+    s.limit = 3;
+
+    FloodTracker t;
+    // three in a row is fine, the fourth triggers
+    CHECK(!t.record(1, 10, 100, 1000, s).triggered);
+    CHECK(!t.record(1, 10, 101, 1000, s).triggered);
+    CHECK(!t.record(1, 10, 102, 1000, s).triggered);
+    auto v = t.record(1, 10, 103, 1000, s);
+    CHECK(v.triggered);
+    CHECK_EQ(v.flood_ids.size(), 4u);
+    CHECK_EQ(v.excess_ids.size(), 1u);
+    CHECK_EQ(v.excess_ids[0], 103);
+
+    // state is reset after a trigger
+    CHECK(!t.record(1, 10, 104, 1000, s).triggered);
+
+    // someone else posting breaks the streak
+    CHECK(!t.record(2, 10, 1, 1000, s).triggered);
+    CHECK(!t.record(2, 10, 2, 1000, s).triggered);
+    CHECK(!t.record(2, 10, 3, 1000, s).triggered);
+    CHECK(!t.record(2, 11, 4, 1000, s).triggered);
+    CHECK(!t.record(2, 10, 5, 1000, s).triggered);
+    // chats are independent
+    CHECK(!t.record(3, 10, 1, 1000, s).triggered);
+
+    // timed limit: more than 2 messages within 10 seconds
+    yacm::storage::FloodSettings ts;
+    ts.timer_count = 2;
+    ts.timer_seconds = 10;
+    FloodTracker tt;
+    CHECK(!tt.record(1, 10, 1, 100, ts).triggered);
+    CHECK(!tt.record(1, 11, 2, 101, ts).triggered);  // other user interleaves
+    CHECK(!tt.record(1, 10, 3, 105, ts).triggered);
+    auto tv = tt.record(1, 10, 4, 109, ts);
+    CHECK(tv.triggered);
+    CHECK_EQ(tv.flood_ids.size(), 3u);
+    CHECK_EQ(tv.excess_ids.size(), 1u);
+    // old messages fall out of the window
+    CHECK(!tt.record(1, 12, 5, 200, ts).triggered);
+    CHECK(!tt.record(1, 12, 6, 211, ts).triggered);
+    CHECK(!tt.record(1, 12, 7, 222, ts).triggered);
+
+    // disabled settings never trigger
+    yacm::storage::FloodSettings off;
+    FloodTracker to;
+    for (int i = 0; i < 50; ++i) CHECK(!to.record(1, 10, i, 100, off).triggered);
+}
+
+void test_timed_actions() {
+    using yacm::services::Role;
+    using yacm::services::ModerationService;
+    using yacm::services::WarnService;
+
+    constexpr int64_t kBot = 777;
+    constexpr int64_t kChat = -100;
+
+    FakeClient fake;
+    fake.members[{kChat, kBot}] = {yacm::tg::User{kBot, true, "Bot", "", "", ""},
+                                   "administrator"};
+    TempDatabase tmp;
+    yacm::storage::ChatRepo chats(tmp.db());
+    yacm::storage::WarnRepo warns(tmp.db());
+    yacm::storage::MuteRepo mutes(tmp.db());
+    yacm::storage::BanRepo bans(tmp.db());
+    yacm::storage::AuditRepo audit(tmp.db());
+    ModerationService moderation(fake, kBot, tmp.db(), mutes, bans, audit);
+    WarnService svc(tmp.db(), chats, warns, audit, kBot, moderation);
+
+    // tban sends an absolute until_date; a plain ban sends none
+    CHECK(moderation.ban(kChat, 1, 2, Role::Everyone, "x", 3600).ok);
+    CHECK_EQ(fake.bans.size(), 1u);
+    CHECK(fake.bans[0].until_date > 3600);
+    CHECK(moderation.ban(kChat, 1, 3, Role::Everyone, "x").ok);
+    CHECK_EQ(fake.bans[1].until_date, 0L);
+    // over a year would be permanent on Telegram's side: refused
+    const auto too_long = moderation.ban(kChat, 1, 4, Role::Everyone, "x", 400LL * 86400);
+    CHECK(!too_long.ok);
+    CHECK_EQ(too_long.error_key, "errors.invalid_duration");
+    CHECK_EQ(fake.bans.size(), 2u);
+
+    // apply() dispatches every kind
+    using yacm::util::Action;
+    CHECK(moderation.apply(kChat, 1, 5, Role::Everyone, Action{Action::Kind::TMute, 600}, "f")
+              .ok);
+    CHECK(fake.restricts.back().until_date > 600);
+    CHECK(moderation.apply(kChat, 1, 5, Role::Everyone, Action{Action::Kind::Kick, 0}, "f").ok);
+    CHECK_EQ(fake.unbans.size(), 1u);
+
+    // warn limit with a timed mode: tmute fires with its duration
+    chats.set_warn_action(kChat, "tmute", 1800);
+    const std::size_t restricts_before = fake.restricts.size();
+    svc.warn(kChat, 1, 9, Role::Everyone, "a");
+    svc.warn(kChat, 1, 9, Role::Everyone, "b");
+    const auto w3 = svc.warn(kChat, 1, 9, Role::Everyone, "c");
+    CHECK(w3.ok);
+    CHECK_EQ(w3.fired_action, "tmute");
+    CHECK_EQ(w3.fired_duration, 1800);
+    CHECK_EQ(fake.restricts.size(), restricts_before + 1);
+    CHECK(fake.restricts.back().until_date > 1800);
+
+    // resetwarn clears everything and reports how many
+    svc.warn(kChat, 1, 10, Role::Everyone, "a");
+    svc.warn(kChat, 1, 10, Role::Everyone, "b");
+    const auto r = svc.reset(kChat, 1, 10, Role::Everyone);
+    CHECK(r.ok);
+    CHECK_EQ(r.removed, 2);
+    CHECK_EQ(svc.count(kChat, 10), 0);
+    // hierarchy still applies
+    CHECK(!svc.reset(kChat, 1, 10, Role::Admin).ok);
+}
+
+// --- AI assistant -------------------------------------------------------------
+
+class FakeAi : public yacm::ai::AiClient {
+public:
+    std::string reply = "Hello!";
+    bool fail = false;
+    std::vector<std::vector<yacm::ai::ChatMessage>> calls;
+    yacm::ai::Completion complete(const std::vector<yacm::ai::ChatMessage>& messages) override {
+        calls.push_back(messages);
+        if (fail) throw yacm::ai::AiError(500, "boom");
+        return {reply, 11, 7};
+    }
+};
+
+void test_ai_protocol() {
+    using yacm::ai::OpenAiClient;
+    yacm::config::AiConfig cfg;
+    cfg.model = "m";
+    cfg.max_tokens = 123;
+    auto body = OpenAiClient::build_request(cfg, {{"system", "s"}, {"user", "u"}});
+    CHECK_EQ(body["model"], "m");
+    CHECK_EQ(body["max_tokens"], 123);
+    CHECK_EQ(body["messages"].size(), 2u);
+    CHECK_EQ(body["messages"][1]["role"], "user");
+    CHECK(!body.contains("temperature"));  // unset sampling params are omitted
+    cfg.temperature = 0.5;
+    CHECK_EQ(OpenAiClient::build_request(cfg, {})["temperature"], 0.5);
+
+    const auto c = OpenAiClient::parse_response(
+        200, R"({"choices":[{"message":{"role":"assistant","content":"hi"}}],)"
+             R"("usage":{"prompt_tokens":42,"completion_tokens":5,"total_tokens":47}})");
+    CHECK_EQ(c.text, "hi");
+    CHECK_EQ(c.prompt_tokens, 42);
+    CHECK_EQ(c.completion_tokens, 5);
+    // providers without usage: unknown (-1), not 0
+    const auto no_usage = OpenAiClient::parse_response(
+        200, R"({"choices":[{"message":{"content":"x"}}]})");
+    CHECK_EQ(no_usage.prompt_tokens, -1);
+    bool threw = false;
+    try {
+        OpenAiClient::parse_response(401, R"({"error":{"message":"bad key"}})");
+    } catch (const yacm::ai::AiError& e) {
+        threw = true;
+        CHECK_EQ(e.status, 401L);
+        CHECK_EQ(std::string(e.what()), "bad key");
+    }
+    CHECK(threw);
+    threw = false;
+    try {
+        OpenAiClient::parse_response(502, "<html>gateway</html>");
+    } catch (const yacm::ai::AiError&) {
+        threw = true;
+    }
+    CHECK(threw);
+}
+
+void test_ai_helpers() {
+    using yacm::ai::is_silent;
+    using yacm::ai::split_message;
+    CHECK(is_silent(""));
+    CHECK(is_silent("  none "));
+    CHECK(is_silent("None."));
+    CHECK(!is_silent("none of that"));
+
+    CHECK_EQ(split_message("short").size(), 1u);
+    const std::string long_text = std::string(30, 'a') + "\n" + std::string(30, 'b');
+    const auto parts = split_message(long_text, 40);
+    CHECK_EQ(parts.size(), 2u);
+    CHECK_EQ(parts[0], std::string(30, 'a') + "\n");  // cut at the newline
+    // never splits a multi-byte character ("я" is 2 bytes)
+    std::string cyr;
+    for (int i = 0; i < 50; ++i) cyr += "я";
+    std::string joined;
+    for (const auto& p : split_message(cyr, 7)) {
+        CHECK(p.size() <= 7);
+        CHECK(p.size() % 2 == 0);
+        joined += p;
+    }
+    CHECK_EQ(joined, cyr);
+
+    // file: values are read from disk; unreadable files keep the literal
+    const auto path = std::filesystem::temp_directory_path() /
+                      ("yacm-ai-" + std::to_string(::getpid()) + ".md");
+    { std::ofstream(path) << "be kind"; }
+    CHECK_EQ(yacm::ai::value_or_file("file:" + path.string()), "be kind");
+    // a plain path works too (the bug: it used to be sent as literal text)
+    CHECK_EQ(yacm::ai::value_or_file(path.string()), "be kind");
+    CHECK_EQ(yacm::ai::value_or_file("  " + path.string() + "  "), "be kind");
+    std::filesystem::remove(path);
+
+    // relative "./dir/file.md" resolves against the working directory
+    const auto dir = std::filesystem::current_path() /
+                     ("yacm-ai-rel-" + std::to_string(::getpid()));
+    std::filesystem::create_directories(dir);
+    { std::ofstream(dir / "ruleset.md") << "rule one"; }
+    const std::string rel = "./" + dir.filename().string() + "/ruleset.md";
+    CHECK_EQ(yacm::ai::value_or_file(rel), "rule one");
+    std::filesystem::remove_all(dir);
+
+    // literal text stays literal
+    CHECK_EQ(yacm::ai::value_or_file("literal"), "literal");
+    CHECK_EQ(yacm::ai::value_or_file("Be nice. Never swear."), "Be nice. Never swear.");
+    // a missing file is never sent to the model as text
+    CHECK_EQ(yacm::ai::value_or_file("file:/no/such/file"), "");
+    CHECK_EQ(yacm::ai::value_or_file("./no/such/ruleset.md"), "");
+    CHECK_EQ(yacm::ai::value_or_file("missing.md"), "");
+}
+
+void test_ai_assistant() {
+    FakeAi fake;
+    yacm::config::AiConfig cfg;
+    cfg.rules = "No politics.";
+    cfg.bio = "You are Duck.";
+    yacm::ai::Assistant assistant(cfg, fake);
+
+    const std::string sys = assistant.system_prompt();
+    CHECK(sys.find("No politics.") != std::string::npos);
+    CHECK(sys.find("You are Duck.") != std::string::npos);
+    CHECK(sys.find("none") != std::string::npos);
+
+    yacm::ai::Request r;
+    r.chat_title = "Test Group";
+    r.user_name = "Ada";
+    r.text = "what is 2+2?";
+    r.replied_text = "math time";
+    auto msgs = assistant.build_messages(r);
+    CHECK_EQ(msgs.size(), 2u);
+    CHECK_EQ(msgs[1].role, "user");
+    CHECK(msgs[1].content.find("Test Group") != std::string::npos);
+    CHECK(msgs[1].content.find("math time") != std::string::npos);
+    CHECK(msgs[1].content.find("Ada said: what is 2+2?") != std::string::npos);
+
+    // recent chat messages come first, as "<author> said: <text>"
+    r.history = {{"@bob", "hi all"}, {"Carol", "photo caption"}};
+    msgs = assistant.build_messages(r);
+    const std::string& u = msgs.back().content;
+    CHECK(u.find("@bob said: hi all\nCarol said: photo caption") != std::string::npos);
+    CHECK(u.find("@bob said") < u.find("Ada said: what is 2+2?"));
+    r.history.clear();
+
+    // replying to the bot continues the conversation as an assistant turn
+    r.replied_is_bot = true;
+    msgs = assistant.build_messages(r);
+    CHECK_EQ(msgs.size(), 3u);
+    CHECK_EQ(msgs[1].role, "assistant");
+    CHECK_EQ(msgs[1].content, "math time");
+
+    const auto answer = assistant.ask(r);
+    CHECK_EQ(answer.text, "Hello!");
+    CHECK_EQ(answer.prompt_tokens, 11);
+    CHECK_EQ(answer.completion_tokens, 7);
+    fake.reply = "none";
+    CHECK(assistant.ask(r).text.empty());
+    fake.fail = true;
+    bool threw = false;
+    try {
+        assistant.ask(r);
+    } catch (const yacm::ai::AiError&) {
+        threw = true;
+    }
+    CHECK(threw);
+}
+
+void test_ai_rate_limiter() {
+    yacm::ai::RateLimiter rl(/*user_cooldown_s=*/10, /*chat_per_min=*/3);
+    CHECK(rl.allow(1, 100, 1000));
+    CHECK(!rl.allow(1, 100, 1005));  // user cooldown
+    CHECK(rl.allow(1, 100, 1010));
+    CHECK(rl.allow(1, 101, 1011));
+    CHECK(!rl.allow(1, 102, 1012));  // chat: 3 per minute
+    CHECK(rl.allow(2, 102, 1012));   // other chats are independent
+    CHECK(rl.allow(1, 102, 1061));   // window slid
+}
+
+void test_ai_worker() {
+    FakeAi fake;
+    yacm::ai::Assistant assistant(yacm::config::AiConfig{}, fake);
+    std::mutex mu;
+    std::vector<std::pair<int64_t, std::optional<std::string>>> delivered;
+    std::vector<yacm::ai::Worker::Result> results;
+    yacm::ai::Worker worker(
+        assistant, fake,
+        [&](const yacm::ai::Worker::Job& job, const yacm::ai::Worker::Result& r) {
+            std::lock_guard<std::mutex> lk(mu);
+            delivered.emplace_back(job.chat_id, r.answer);
+            results.push_back(r);
+        },
+        /*queue_limit=*/10, spdlog::default_logger());
+    worker.start();
+    yacm::ai::Worker::Job job;
+    job.chat_id = 5;
+    job.request.text = "hi";
+    CHECK(worker.submit(job));
+    for (int i = 0; i < 200; ++i) {
+        {
+            std::lock_guard<std::mutex> lk(mu);
+            if (!delivered.empty()) break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    {
+        std::lock_guard<std::mutex> lk(mu);
+        CHECK_EQ(delivered.size(), 1u);
+        if (!delivered.empty()) {
+            CHECK_EQ(delivered[0].first, 5);
+            CHECK_EQ(delivered[0].second, std::optional<std::string>("Hello!"));
+            CHECK_EQ(results[0].prompt_tokens, 11);
+            CHECK_EQ(results[0].completion_tokens, 7);
+            CHECK(results[0].elapsed_ms >= 0);
+        }
+    }
+    worker.shutdown();
+    CHECK(!worker.submit(job));  // refused after shutdown
+}
+
+void test_chat_repo_ai() {
+    TempDatabase tmp;
+    yacm::storage::ChatRepo repo(tmp.db());
+    CHECK(repo.ai_enabled(7));      // default on
+    CHECK(!repo.ai_autoreply(7));   // default off
+    repo.set_ai_enabled(7, false);
+    repo.set_ai_autoreply(7, true);
+    CHECK(!repo.ai_enabled(7));
+    CHECK(repo.ai_autoreply(7));
+    const auto s = repo.settings(7);
+    CHECK(!s.ai_enabled);
+    CHECK(s.ai_autoreply);
+}
+
+void test_command_throttle() {
+    yacm::services::CommandThrottle t(/*max=*/5, /*window_ms=*/2000, /*block_ms=*/10000);
+    // 5 commands within 2 s are fine
+    for (int i = 0; i < 5; ++i) CHECK(t.allow(1, 1000 + i * 100));
+    // the 6th within the window blocks the user (and is itself ignored)
+    CHECK(!t.allow(1, 1500));
+    CHECK(t.blocked(1, 1500));
+    CHECK(!t.allow(1, 5000));       // still blocked
+    CHECK(!t.allow(1, 11499));      // attempts don't extend the block
+    CHECK(t.allow(1, 11500));       // 10 s after the block started
+    // other users are unaffected
+    CHECK(t.allow(2, 1500));
+    // slow senders never trip it: 6 commands spread over > 2 s
+    yacm::services::CommandThrottle slow;
+    for (int i = 0; i < 20; ++i) CHECK(slow.allow(3, i * 500));
+}
+
+void test_chat_history() {
+    yacm::services::ChatHistory h(5);
+    CHECK(h.recent(1).empty());
+    for (int i = 1; i <= 7; ++i) h.record(1, {"@u", "m" + std::to_string(i)});
+    const auto r = h.recent(1);
+    CHECK_EQ(r.size(), 5u);  // only the last 5
+    CHECK_EQ(r.front().text, "m3");
+    CHECK_EQ(r.back().text, "m7");
+    h.record(1, {"@u", ""});  // image without caption: nothing to store
+    CHECK_EQ(h.recent(1).back().text, "m7");
+    CHECK(h.recent(2).empty());  // per chat
+    // long messages are cut (UTF-8 safe)
+    std::string big;
+    for (int i = 0; i < 2000; ++i) big += "я";
+    h.record(3, {"@u", big});
+    CHECK(h.recent(3)[0].text.size() <= yacm::services::ChatHistory::kMaxTextBytes + 3);
+}
+
+void test_caption_parsing() {
+    const auto j = nlohmann::json::parse(R"({
+        "message_id": 1, "date": 5,
+        "chat": {"id": -100, "type": "supergroup"},
+        "from": {"id": 7, "first_name": "Ann", "username": "ann"},
+        "photo": [{"file_id": "x"}],
+        "caption": "look at this",
+        "reply_to_message": {"message_id": 0, "date": 1, "photo": [], "caption": "old pic"}
+    })");
+    const auto m = j.get<yacm::tg::Message>();
+    CHECK(m.text.empty());
+    CHECK_EQ(m.content(), "look at this");
+    CHECK(!m.is_command());
+    CHECK_EQ(m.reply_to->content(), "old pic");
+    CHECK_EQ(yacm::util::author_handle(*m.from), "@ann");
+    CHECK_EQ(yacm::util::author_handle(yacm::tg::User{9, false, "Bo", "Li", "", ""}), "Bo Li");
+}
+
+void test_global_bans_and_settings() {
+    TempDatabase tmp;
+    yacm::storage::GlobalBanRepo bans(tmp.db());
+    CHECK(!bans.is_banned(5));
+    CHECK(bans.add(5, "spam", 1, 100));
+    CHECK(!bans.add(5, "again", 1, 101));  // already banned
+    CHECK(bans.is_banned(5));
+    CHECK(bans.remove(5));
+    CHECK(!bans.remove(5));
+    CHECK(!bans.is_banned(5));
+
+    yacm::storage::BotSettingsRepo settings(tmp.db());
+    CHECK(!settings.flag("ai_debug"));
+    CHECK(settings.flag("ai_debug", true));  // fallback
+    settings.set_flag("ai_debug", true);
+    CHECK(settings.flag("ai_debug"));
+    settings.set_flag("ai_debug", false);
+    CHECK(!settings.flag("ai_debug", true));
+}
+
+void test_router_own_command() {
+    yacm::router::HandlerRegistry r;
+    r.set_bot_username("MyBot");
+    r.add("ping", [](const yacm::tg::Message&, const std::string&) {});
+    yacm::tg::Message m;
+    m.text = "/ping";
+    CHECK(r.is_own_command(m));
+    m.text = "/ping@mybot extra";
+    CHECK(r.is_own_command(m));
+    m.text = "/ping@OtherBot";
+    CHECK(!r.is_own_command(m));
+    m.text = "/unknown";
+    CHECK(!r.is_own_command(m));
+    m.text = "hello";
+    CHECK(!r.is_own_command(m));
+}
+
 }  // namespace
 
 int main() {
@@ -1048,6 +1567,21 @@ int main() {
     test_moderation_service();
     test_roles_live();
     test_warn_limit_action();
+    test_parse_action();
+    test_chat_repo_flood();
+    test_flood_tracker();
+    test_timed_actions();
+    test_ai_protocol();
+    test_ai_helpers();
+    test_ai_assistant();
+    test_ai_rate_limiter();
+    test_ai_worker();
+    test_chat_repo_ai();
+    test_command_throttle();
+    test_chat_history();
+    test_caption_parsing();
+    test_global_bans_and_settings();
+    test_router_own_command();
 
     std::printf("%d checks, %d failures\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;

@@ -172,4 +172,86 @@ std::optional<bool> parse_yes_no(const std::string& token) {
     return std::nullopt;
 }
 
+std::string Action::name() const {
+    switch (kind) {
+        case Kind::Ban: return "ban";
+        case Kind::Kick: return "kick";
+        case Kind::Mute: return "mute";
+        case Kind::TBan: return "tban";
+        case Kind::TMute: return "tmute";
+    }
+    return "mute";
+}
+
+std::string Action::describe() const {
+    if (timed()) return name() + " " + format_duration(duration_s);
+    return name();
+}
+
+std::optional<Action> parse_action(const std::string& args) {
+    std::string s = trim(args);
+    std::transform(s.begin(), s.end(), s.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    std::string head = s;
+    std::string tail;
+    const std::size_t sp = s.find_first_of(" \t");
+    if (sp != std::string::npos) {
+        head = s.substr(0, sp);
+        tail = trim(s.substr(sp + 1));
+    }
+
+    Action a;
+    if (head == "ban") a.kind = Action::Kind::Ban;
+    else if (head == "kick") a.kind = Action::Kind::Kick;
+    else if (head == "mute") a.kind = Action::Kind::Mute;
+    else if (head == "tban") a.kind = Action::Kind::TBan;
+    else if (head == "tmute") a.kind = Action::Kind::TMute;
+    else return std::nullopt;
+
+    if (!a.timed()) {
+        if (!tail.empty()) return std::nullopt;
+        return a;
+    }
+    const auto d = parse_duration_seconds(tail);
+    if (!d) return std::nullopt;
+    a.duration_s = *d;
+    return a;
+}
+
+Action action_from_db(const std::string& name, int64_t duration_s) {
+    Action a;
+    if (name == "ban") a.kind = Action::Kind::Ban;
+    else if (name == "kick") a.kind = Action::Kind::Kick;
+    else if (name == "tban" && duration_s > 0) a.kind = Action::Kind::TBan;
+    else if (name == "tmute" && duration_s > 0) a.kind = Action::Kind::TMute;
+    else a.kind = Action::Kind::Mute;
+    a.duration_s = a.timed() ? duration_s : 0;
+    return a;
+}
+
+std::string format_duration(int64_t seconds) {
+    if (seconds <= 0) return "0s";
+    struct Unit {
+        int64_t size;
+        char suffix;
+    };
+    static constexpr Unit kUnits[] = {
+        {604800, 'w'}, {86400, 'd'}, {3600, 'h'}, {60, 'm'}, {1, 's'},
+    };
+    for (const auto& u : kUnits) {
+        if (seconds % u.size == 0) return std::to_string(seconds / u.size) + u.suffix;
+    }
+    return std::to_string(seconds) + "s";
+}
+
+std::optional<int> parse_int_in_range(const std::string& token, int min, int max) {
+    const std::string v = trim(token);
+    if (!all_digits(v)) return std::nullopt;
+    int n = 0;
+    auto [ptr, ec] = std::from_chars(v.data(), v.data() + v.size(), n);
+    if (ec != std::errc{} || ptr != v.data() + v.size()) return std::nullopt;
+    if (n < min || n > max) return std::nullopt;
+    return n;
+}
+
 }  // namespace yacm::util

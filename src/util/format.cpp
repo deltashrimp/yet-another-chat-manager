@@ -38,6 +38,11 @@ std::string chat_display(const tg::Chat& chat, const std::string& fallback_title
     return escaped;
 }
 
+std::string author_handle(const tg::User& user) {
+    if (!user.username.empty()) return "@" + user.username;
+    return display_name_or_id(user);
+}
+
 std::string display_name(const tg::User& user) {
     std::string name = user.first_name;
     if (!user.last_name.empty()) {

@@ -37,6 +37,10 @@ bool require_role(app::AppContext& ctx, const tg::Message& src, services::Role r
 std::optional<storage::UserRow> resolve_user_ref(app::AppContext& ctx, const tg::Message& m,
                                                  const std::string& args);
 
+// Best-effort message deletion (missing rights / already deleted messages
+// are logged, never surfaced to the chat).
+void try_delete(app::AppContext& ctx, int64_t chat_id, int64_t message_id);
+
 // "@username", or an HTML profile link built from the display name.
 std::string user_handle(const storage::UserRow& row);
 

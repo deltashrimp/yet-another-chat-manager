@@ -62,6 +62,20 @@ private:
     Database& db_;
 };
 
+// Antiflood configuration of a chat. Both limits 0 = antiflood off.
+struct FloodSettings {
+    int limit = 0;              // consecutive messages by one user (0 = off)
+    int timer_count = 0;        // N messages ...
+    int64_t timer_seconds = 0;  // ... within S seconds (0 = off)
+    std::string action = "mute";
+    int64_t action_duration = 0;  // for tban / tmute
+    bool clear = false;           // delete the whole flood, not just the excess
+
+    [[nodiscard]] bool enabled() const {
+        return limit > 0 || (timer_count > 0 && timer_seconds > 0);
+    }
+};
+
 // Snapshot of per-chat settings (steps 4-8 read most of these).
 struct ChatSettings {
     std::string language = "en";
@@ -69,6 +83,10 @@ struct ChatSettings {
     bool reports_enabled = true;
     int warn_limit = 3;
     std::string warn_action = "mute";
+    int64_t warn_action_duration = 0;  // for tban / tmute
+    FloodSettings flood;
+    bool ai_enabled = true;
+    bool ai_autoreply = false;
 };
 
 class ChatRepo {
@@ -92,9 +110,24 @@ public:
     bool reports_enabled(int64_t chat_id) const;
 
     void set_warn_limit(int64_t chat_id, int limit);
-    void set_warn_action(int64_t chat_id, const std::string& action);
+    // duration_s is only meaningful for "tban" / "tmute" (0 otherwise).
+    void set_warn_action(int64_t chat_id, const std::string& action, int64_t duration_s = 0);
     int warn_limit(int64_t chat_id) const;
     std::string warn_action(int64_t chat_id) const;
+    int64_t warn_action_duration(int64_t chat_id) const;
+
+    // Antiflood (schema defaults = off for a chat the bot has not seen).
+    FloodSettings flood_settings(int64_t chat_id) const;
+    void set_flood_limit(int64_t chat_id, int limit);
+    void set_flood_timer(int64_t chat_id, int count, int64_t seconds);
+    void set_flood_action(int64_t chat_id, const std::string& action, int64_t duration_s);
+    void set_flood_clear(int64_t chat_id, bool clear);
+
+    // AI assistant switches (defaults: enabled, no auto-replies).
+    bool ai_enabled(int64_t chat_id) const;
+    void set_ai_enabled(int64_t chat_id, bool enabled);
+    bool ai_autoreply(int64_t chat_id) const;
+    void set_ai_autoreply(int64_t chat_id, bool enabled);
 
     // All settings at once; schema defaults for a chat the bot has not seen.
     ChatSettings settings(int64_t chat_id) const;
@@ -126,8 +159,9 @@ public:
 
     int count(int64_t chat_id, int64_t user_id) const;
 
-    // Removes all warns (warn-limit reset in step 4).
-    void clear(int64_t chat_id, int64_t user_id);
+    // Removes all warns (warn-limit reset in step 4). Returns how many
+    // were removed.
+    int clear(int64_t chat_id, int64_t user_id);
 
 private:
     Database& db_;
@@ -201,6 +235,36 @@ public:
 
     // True unless the chat explicitly disabled answers for this command.
     bool enabled(int64_t chat_id, const std::string& command) const;
+
+private:
+    Database& db_;
+};
+
+// Users banned from the bot itself (/gbban): all their updates are ignored.
+class GlobalBanRepo {
+public:
+    explicit GlobalBanRepo(Database& db);
+
+    // false when the user was already banned.
+    bool add(int64_t user_id, const std::string& reason, int64_t created_by,
+             int64_t created_at);
+    // false when the user was not banned.
+    bool remove(int64_t user_id);
+    bool is_banned(int64_t user_id) const;
+
+private:
+    Database& db_;
+};
+
+// Bot-wide key/value settings (not per chat).
+class BotSettingsRepo {
+public:
+    explicit BotSettingsRepo(Database& db);
+
+    std::optional<std::string> get(const std::string& key) const;
+    void set(const std::string& key, const std::string& value);
+    bool flag(const std::string& key, bool fallback = false) const;
+    void set_flag(const std::string& key, bool value);
 
 private:
     Database& db_;

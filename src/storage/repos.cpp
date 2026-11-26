@@ -2,6 +2,8 @@
 
 #include "storage/db.hpp"
 
+#include <sqlite3.h>
+
 #include <algorithm>
 #include <cctype>
 
@@ -232,12 +234,110 @@ void ChatRepo::set_warn_limit(int64_t chat_id, int limit) {
     st.step();
 }
 
-void ChatRepo::set_warn_action(int64_t chat_id, const std::string& action) {
+void ChatRepo::set_warn_action(int64_t chat_id, const std::string& action,
+                               int64_t duration_s) {
     Statement st(db_.raw(),
-                 "INSERT INTO chats (id, warn_action) VALUES (?1, ?2) "
-                 "ON CONFLICT(id) DO UPDATE SET warn_action = excluded.warn_action");
+                 "INSERT INTO chats (id, warn_action, warn_action_duration) VALUES (?1, ?2, ?3) "
+                 "ON CONFLICT(id) DO UPDATE SET warn_action = excluded.warn_action, "
+                 " warn_action_duration = excluded.warn_action_duration");
     st.bind(1, chat_id);
     st.bind(2, action);
+    st.bind(3, duration_s);
+    st.step();
+}
+
+int64_t ChatRepo::warn_action_duration(int64_t chat_id) const {
+    Statement st(db_.raw(), "SELECT warn_action_duration FROM chats WHERE id = ?1");
+    st.bind(1, chat_id);
+    return st.step() ? st.col_i64(0) : 0;
+}
+
+FloodSettings ChatRepo::flood_settings(int64_t chat_id) const {
+    FloodSettings f;
+    Statement st(db_.raw(),
+                 "SELECT flood_limit, flood_timer_count, flood_timer_seconds, flood_action, "
+                 "       flood_action_duration, flood_clear "
+                 "FROM chats WHERE id = ?1");
+    st.bind(1, chat_id);
+    if (!st.step()) return f;
+    f.limit = st.col_int(0);
+    f.timer_count = st.col_int(1);
+    f.timer_seconds = st.col_i64(2);
+    f.action = st.col_str(3);
+    f.action_duration = st.col_i64(4);
+    f.clear = st.col_bool(5);
+    return f;
+}
+
+void ChatRepo::set_flood_limit(int64_t chat_id, int limit) {
+    Statement st(db_.raw(),
+                 "INSERT INTO chats (id, flood_limit) VALUES (?1, ?2) "
+                 "ON CONFLICT(id) DO UPDATE SET flood_limit = excluded.flood_limit");
+    st.bind(1, chat_id);
+    st.bind(2, static_cast<int64_t>(limit));
+    st.step();
+}
+
+void ChatRepo::set_flood_timer(int64_t chat_id, int count, int64_t seconds) {
+    Statement st(db_.raw(),
+                 "INSERT INTO chats (id, flood_timer_count, flood_timer_seconds) "
+                 "VALUES (?1, ?2, ?3) "
+                 "ON CONFLICT(id) DO UPDATE SET flood_timer_count = excluded.flood_timer_count, "
+                 " flood_timer_seconds = excluded.flood_timer_seconds");
+    st.bind(1, chat_id);
+    st.bind(2, static_cast<int64_t>(count));
+    st.bind(3, seconds);
+    st.step();
+}
+
+void ChatRepo::set_flood_action(int64_t chat_id, const std::string& action,
+                                int64_t duration_s) {
+    Statement st(db_.raw(),
+                 "INSERT INTO chats (id, flood_action, flood_action_duration) VALUES (?1, ?2, ?3) "
+                 "ON CONFLICT(id) DO UPDATE SET flood_action = excluded.flood_action, "
+                 " flood_action_duration = excluded.flood_action_duration");
+    st.bind(1, chat_id);
+    st.bind(2, action);
+    st.bind(3, duration_s);
+    st.step();
+}
+
+bool ChatRepo::ai_enabled(int64_t chat_id) const {
+    Statement st(db_.raw(), "SELECT ai_enabled FROM chats WHERE id = ?1");
+    st.bind(1, chat_id);
+    return st.step() ? st.col_bool(0) : true;
+}
+
+void ChatRepo::set_ai_enabled(int64_t chat_id, bool enabled) {
+    Statement st(db_.raw(),
+                 "INSERT INTO chats (id, ai_enabled) VALUES (?1, ?2) "
+                 "ON CONFLICT(id) DO UPDATE SET ai_enabled = excluded.ai_enabled");
+    st.bind(1, chat_id);
+    st.bind(2, static_cast<int64_t>(enabled ? 1 : 0));
+    st.step();
+}
+
+bool ChatRepo::ai_autoreply(int64_t chat_id) const {
+    Statement st(db_.raw(), "SELECT ai_autoreply FROM chats WHERE id = ?1");
+    st.bind(1, chat_id);
+    return st.step() && st.col_bool(0);
+}
+
+void ChatRepo::set_ai_autoreply(int64_t chat_id, bool enabled) {
+    Statement st(db_.raw(),
+                 "INSERT INTO chats (id, ai_autoreply) VALUES (?1, ?2) "
+                 "ON CONFLICT(id) DO UPDATE SET ai_autoreply = excluded.ai_autoreply");
+    st.bind(1, chat_id);
+    st.bind(2, static_cast<int64_t>(enabled ? 1 : 0));
+    st.step();
+}
+
+void ChatRepo::set_flood_clear(int64_t chat_id, bool clear) {
+    Statement st(db_.raw(),
+                 "INSERT INTO chats (id, flood_clear) VALUES (?1, ?2) "
+                 "ON CONFLICT(id) DO UPDATE SET flood_clear = excluded.flood_clear");
+    st.bind(1, chat_id);
+    st.bind(2, static_cast<int64_t>(clear ? 1 : 0));
     st.step();
 }
 
@@ -257,7 +357,7 @@ ChatSettings ChatRepo::settings(int64_t chat_id) const {
     ChatSettings s;
     Statement st(db_.raw(),
                  "SELECT language, COALESCE(rules_html, ''), reports_enabled, warn_limit, "
-                 "       warn_action "
+                 "       warn_action, warn_action_duration, ai_enabled, ai_autoreply "
                  "FROM chats WHERE id = ?1");
     st.bind(1, chat_id);
     if (!st.step()) return s;  // unknown chat -> defaults
@@ -266,6 +366,10 @@ ChatSettings ChatRepo::settings(int64_t chat_id) const {
     s.reports_enabled = st.col_bool(2);
     s.warn_limit = st.col_int(3);
     s.warn_action = st.col_str(4);
+    s.warn_action_duration = st.col_i64(5);
+    s.ai_enabled = st.col_bool(6);
+    s.ai_autoreply = st.col_bool(7);
+    s.flood = flood_settings(chat_id);
     return s;
 }
 
@@ -324,11 +428,12 @@ int WarnRepo::count(int64_t chat_id, int64_t user_id) const {
     return st.step() ? st.col_int(0) : 0;
 }
 
-void WarnRepo::clear(int64_t chat_id, int64_t user_id) {
+int WarnRepo::clear(int64_t chat_id, int64_t user_id) {
     Statement st(db_.raw(), "DELETE FROM warns WHERE chat_id = ?1 AND user_id = ?2");
     st.bind(1, chat_id);
     st.bind(2, user_id);
     st.step();
+    return sqlite3_changes(db_.raw());
 }
 
 // --- MuteRepo ------------------------------------------------------------
@@ -499,6 +604,65 @@ void AuditRepo::log(int64_t chat_id, int64_t actor_id, const std::string& action
     st.bind(5, details);
     st.bind(6, created_at);
     st.step();
+}
+
+// --- GlobalBanRepo ------------------------------------------------------
+
+GlobalBanRepo::GlobalBanRepo(Database& db) : db_(db) {}
+
+bool GlobalBanRepo::add(int64_t user_id, const std::string& reason, int64_t created_by,
+                        int64_t created_at) {
+    Statement st(db_.raw(),
+                 "INSERT OR IGNORE INTO global_bans (user_id, reason, created_by, created_at) "
+                 "VALUES (?1, ?2, ?3, ?4)");
+    st.bind(1, user_id);
+    st.bind(2, reason);
+    st.bind(3, created_by);
+    st.bind(4, created_at);
+    st.step();
+    return sqlite3_changes(db_.raw()) > 0;
+}
+
+bool GlobalBanRepo::remove(int64_t user_id) {
+    Statement st(db_.raw(), "DELETE FROM global_bans WHERE user_id = ?1");
+    st.bind(1, user_id);
+    st.step();
+    return sqlite3_changes(db_.raw()) > 0;
+}
+
+bool GlobalBanRepo::is_banned(int64_t user_id) const {
+    Statement st(db_.raw(), "SELECT 1 FROM global_bans WHERE user_id = ?1");
+    st.bind(1, user_id);
+    return st.step();
+}
+
+// --- BotSettingsRepo ----------------------------------------------------
+
+BotSettingsRepo::BotSettingsRepo(Database& db) : db_(db) {}
+
+std::optional<std::string> BotSettingsRepo::get(const std::string& key) const {
+    Statement st(db_.raw(), "SELECT value FROM bot_settings WHERE key = ?1");
+    st.bind(1, key);
+    if (!st.step()) return std::nullopt;
+    return st.col_str(0);
+}
+
+void BotSettingsRepo::set(const std::string& key, const std::string& value) {
+    Statement st(db_.raw(),
+                 "INSERT INTO bot_settings (key, value) VALUES (?1, ?2) "
+                 "ON CONFLICT(key) DO UPDATE SET value = excluded.value");
+    st.bind(1, key);
+    st.bind(2, value);
+    st.step();
+}
+
+bool BotSettingsRepo::flag(const std::string& key, bool fallback) const {
+    const auto v = get(key);
+    return v ? *v == "1" : fallback;
+}
+
+void BotSettingsRepo::set_flag(const std::string& key, bool value) {
+    set(key, value ? "1" : "0");
 }
 
 }  // namespace yacm::storage

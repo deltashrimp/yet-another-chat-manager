@@ -34,6 +34,10 @@ struct ReplyTo {
     int64_t date = 0;
     std::optional<User> from;
     std::string text;
+    std::string caption;  // text attached to a photo/video/document
+
+    // Readable text: the message text, or the media caption.
+    [[nodiscard]] const std::string& content() const { return text.empty() ? caption : text; }
 };
 
 struct Message {
@@ -42,6 +46,7 @@ struct Message {
     std::optional<Chat> chat;
     std::optional<User> from;
     std::string text;
+    std::string caption;  // text attached to a photo/video/document
     std::optional<ReplyTo> reply_to;
     std::vector<User> new_chat_members;
     std::optional<User> left_chat_member;
@@ -49,6 +54,9 @@ struct Message {
     [[nodiscard]] bool is_command() const {
         return !text.empty() && text.front() == '/';
     }
+    // Readable text: the message text, or the media caption (images
+    // themselves are never read).
+    [[nodiscard]] const std::string& content() const { return text.empty() ? caption : text; }
 };
 
 struct ChatMemberUpdated {

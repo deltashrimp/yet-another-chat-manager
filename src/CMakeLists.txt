@@ -1,14 +1,21 @@
 set(YACM_SOURCES
   app/app_context.cpp
   config/config.cpp
+  handlers/ai.cpp
+  handlers/antiflood.cpp
   handlers/common.cpp
   handlers/general.cpp
   handlers/moderation.cpp
+  handlers/owner.cpp
   handlers/settings.cpp
   i18n/strings.cpp
   router/router.cpp
+  services/ai.cpp
+  services/antiflood.cpp
+  services/history.cpp
   services/moderation.cpp
   services/roles.cpp
+  services/throttle.cpp
   services/warns.cpp
   storage/db.cpp
   storage/repos.cpp
